@@ -2,7 +2,7 @@ import httpx
 import os
 from utils.handler_asr import SarvamHandler
 
-SARVAM_API_KEY = "sk_eripea2q_qPQFtS6uPiAFrhgDGZtKMLzx"
+SARVAM_API_KEY = "sk_fdhizu4s_AncTIUAXmNFRRZZPOaSYftiH"
 
 sarvam = SarvamHandler(SARVAM_API_KEY)
 EXOTEL_SID = os.getenv("EXOTEL_SID")
