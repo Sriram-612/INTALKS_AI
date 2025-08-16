@@ -36,8 +36,6 @@ from utils import bedrock_client
 from utils.agent_transfer import trigger_exotel_agent_transfer
 from utils.logger import setup_application_logging, logger
 from utils.handler_asr import SarvamHandler
-from utils.production_asr import ProductionSarvamHandler
-from utils.enhanced_language_detection import enhanced_language_detector, detect_language_enhanced
 from utils.redis_session import (init_redis, redis_manager,
                                  generate_websocket_session_id)
 
@@ -86,10 +84,10 @@ app.add_middleware(
 )
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
-sarvam_handler = ProductionSarvamHandler(SARVAM_API_KEY)
+sarvam_handler = SarvamHandler(SARVAM_API_KEY)
 
 # --- Constants ---
-BUFFER_DURATION_SECONDS = 6.0  # Increased to 6 seconds for production rate limiting
+BUFFER_DURATION_SECONDS = 1.0
 
 # --- Multilingual Prompt Templates with SSML and Pauses ---
 GREETING_TEMPLATE = {
@@ -762,16 +760,12 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                 if interaction_complete:
                     continue
 
-                # Always accumulate audio for proper transcription
-                # Telephony streams include silence and low-energy frames
-                if raw_audio:
+                if raw_audio and any(b != 0 for b in raw_audio):
                     audio_buffer.extend(raw_audio)
-                    logger.websocket.info(f"📼 Audio buffer: {len(audio_buffer)} bytes, Stage: {conversation_stage}")
                 
                 now = time.time()
 
                 if now - last_transcription_time >= BUFFER_DURATION_SECONDS:
-                    logger.websocket.info(f"🚀 Transcription trigger: Buffer={len(audio_buffer)} bytes, Stage={conversation_stage}")
                     if len(audio_buffer) == 0:
                         if conversation_stage == "WAITING_FOR_LANG_DETECT":
                             logger.websocket.info("No audio received during language detection stage. Playing 'didn't hear' prompt.")
@@ -803,31 +797,13 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                         continue
 
                     try:
-                        transcript, auto_detected_lang = await sarvam_handler.transcribe_with_fallback(
-                            audio_buffer, customer_info.get('lang', 'en-IN')
-                        )
+                        transcript = sarvam_handler.transcribe_from_payload(audio_buffer)
                         logger.websocket.info(f"📝 Transcript: {transcript}")
                         logger.log_call_event("TRANSCRIPT_RECEIVED", call_sid, customer_info['name'], {"transcript": transcript, "stage": conversation_stage})
 
                         if transcript:
                             if conversation_stage == "WAITING_FOR_LANG_DETECT":
-                                # Use enhanced language detection with multiple strategies
-                                call_detected_lang = detect_language_enhanced(transcript, customer_info)
-                                
-                                # Also try Sarvam text-lid API for better accuracy
-                                try:
-                                    sarvam_detected_lang = await sarvam_handler.detect_language_from_text(transcript)
-                                    if sarvam_detected_lang and sarvam_detected_lang != "en-IN":
-                                        call_detected_lang = sarvam_detected_lang
-                                        logger.websocket.info(f"🌐 Using Sarvam API language detection: {sarvam_detected_lang}")
-                                except Exception as e:
-                                    logger.websocket.error(f"❌ Sarvam language detection failed: {e}")
-                                
-                                # Ensure we always have a valid language, default to English
-                                if not call_detected_lang or call_detected_lang == "unknown":
-                                    call_detected_lang = "en-IN"
-                                    logger.websocket.info("🔤 No language detected, defaulting to English (en-IN)")
-                                
+                                call_detected_lang = detect_language(transcript)
                                 logger.websocket.info(f"2. Detected Language from user response: {call_detected_lang}")
                                 logger.websocket.info(f"State-based language: {initial_greeting_language}")
                                 logger.websocket.info(f"CSV language: {csv_language}")
@@ -847,125 +823,81 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                 else:
                                     logger.websocket.info(f"User language matches state language. Continuing with {final_language}")
                                 
-                                # Final fallback to English if still no valid language
-                                if not final_language or final_language == "unknown":
-                                    final_language = "en-IN"
-                                    logger.websocket.info("🔤 Final fallback to English (en-IN)")
+                                # If no specific language detected, fallback to state language
+                                if call_detected_lang == "en-IN" and initial_greeting_language != "en-IN":
+                                    logger.websocket.info(f"No specific language detected from user. Using state language: {initial_greeting_language}")
+                                    final_language = initial_greeting_language
                                 
                                 # Update the detected language for further conversation
                                 call_detected_lang = final_language
                                 
-                                # Start EMI delivery with proper stage management
+                                # Play EMI details in final determined language
                                 try:
                                     await play_emi_details_part1(websocket, customer_info or {}, call_detected_lang)
-                                    conversation_stage = "EMI_PART1_COMPLETE"
-                                    logger.tts.info(f"✅ EMI part 1 sent successfully in {call_detected_lang}")
-                                    logger.log_call_event("EMI_PART1_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
-                                    
-                                    # Wait a moment and then continue to part 2
-                                    await asyncio.sleep(3)
-                                    
                                     await play_emi_details_part2(websocket, customer_info or {}, call_detected_lang)
-                                    conversation_stage = "EMI_PART2_COMPLETE"
-                                    logger.tts.info(f"✅ EMI part 2 sent successfully in {call_detected_lang}")
-                                    logger.log_call_event("EMI_PART2_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
-                                    
-                                    # Wait a moment and then ask agent question
-                                    await asyncio.sleep(3)
-                                    
                                     await play_agent_connect_question(websocket, call_detected_lang)
                                     conversation_stage = "WAITING_AGENT_RESPONSE"
-                                    logger.tts.info(f"✅ Agent question sent in {call_detected_lang}")
-                                    logger.log_call_event("AGENT_QUESTION_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
-                                    
+                                    logger.tts.info(f"✅ EMI details and agent question sent successfully in {call_detected_lang}")
+                                    logger.log_call_event("EMI_DETAILS_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
                                 except Exception as e:
-                                    logger.tts.error(f"❌ Error playing EMI part 1: {e}")
-                                    logger.log_call_event("EMI_PART1_ERROR", call_sid, customer_info['name'], {"error": str(e)})
+                                    logger.tts.error(f"❌ Error playing EMI details: {e}")
+                                    logger.log_call_event("EMI_DETAILS_ERROR", call_sid, customer_info['name'], {"error": str(e)})
                             
                             elif conversation_stage == "WAITING_AGENT_RESPONSE":
-                                # Enhanced Claude-based intent detection for better human-like interaction
+                                # Use Claude for intent detection
                                 try:
-                                    # Build conversation context for Claude
-                                    conversation_context = f"""
-Customer Name: {customer_info['name']}
-Loan ID: {customer_info['loan_id']}
-EMI Amount: ₹{customer_info['amount']}
-Due Date: {customer_info['due_date']}
-Language: {call_detected_lang}
+                                    intent = detect_intent_with_claude(transcript, call_detected_lang)
+                                    logger.websocket.info(f"Claude detected intent: {intent}")
+                                    logger.log_call_event("INTENT_DETECTED_CLAUDE", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript})
+                                except Exception as e:
+                                    logger.websocket.error(f"❌ Error in Claude intent detection: {e}")
+                                    # Fallback to keyword-based detection
+                                    intent = detect_intent_fur(transcript, call_detected_lang)
+                                    logger.websocket.info(f"Fallback intent detection: {intent}")
+                                    logger.log_call_event("INTENT_DETECTED_FALLBACK", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript})
 
-Previous conversation: EMI details have been shared. Customer was asked if they want to connect with an agent.
-
-Customer's response: "{transcript}"
-
-Analyze the customer's intent. Return ONLY one of these:
-- "affirmative" (if customer wants to talk to agent - yes, okay, sure, connect, agent, etc.)
-- "negative" (if customer doesn't want agent - no, not now, later, etc.)  
-- "unclear" (if response is unclear or unrelated)
-- "payment_inquiry" (if asking about payment methods, due dates, etc.)
-- "dispute" (if disputing the amount or questioning the EMI)
-- "already_paid" (if claiming payment was already made)
-"""
-                                    
-                                    intent = detect_intent_with_claude(conversation_context, call_detected_lang)
-                                    logger.websocket.info(f"Claude detected intent: {intent} for response: '{transcript}'")
-                                    logger.log_call_event("INTENT_DETECTED_CLAUDE", call_sid, customer_info['name'], {
-                                        "intent": intent, 
-                                        "transcript": transcript,
-                                        "method": "claude_enhanced"
-                                    })
-                                    
-                                    # Handle different intents with human-like responses
-                                    if intent == "affirmative":
-                                        logger.websocket.info("Customer wants agent transfer - initiating")
-                                        customer_number = customer_info.get('phone', '08438019383') 
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number)
+                                if intent == "affirmative" or intent == "agent_transfer":
+                                    if conversation_stage != "TRANSFERRING_TO_AGENT":  # Prevent multiple transfers
+                                        logger.websocket.info("User affirmed agent transfer. Initiating transfer.")
+                                        logger.log_call_event("AGENT_TRANSFER_INITIATED", call_sid, customer_info['name'], {"intent": intent})
+                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
                                         conversation_stage = "TRANSFERRING_TO_AGENT"
                                         interaction_complete = True
-                                        
-                                    elif intent == "negative":
-                                        logger.websocket.info("Customer declined agent transfer")
+                                        await websocket.close()
+                                        logger.websocket.info("🔒 WebSocket closed after agent transfer")
+                                        logger.log_call_event("WEBSOCKET_CLOSED_AGENT_TRANSFER", call_sid, customer_info['name'])
+                                        break
+                                    else:
+                                        logger.websocket.warning("⚠️ Agent transfer already in progress, ignoring duplicate request")
+                                elif intent == "negative":
+                                    if conversation_stage != "GOODBYE_DECLINE":  # Prevent multiple goodbyes
+                                        logger.websocket.info("User declined agent transfer. Saying goodbye.")
+                                        logger.log_call_event("AGENT_TRANSFER_DECLINED", call_sid, customer_info['name'])
                                         await play_goodbye_after_decline(websocket, call_detected_lang)
                                         conversation_stage = "GOODBYE_DECLINE"
                                         interaction_complete = True
-                                        
-                                    elif intent == "payment_inquiry":
-                                        logger.websocket.info("Customer has payment inquiry - transferring to agent")
-                                        customer_number = customer_info.get('phone', '08438019383')
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number)
+                                    else:
+                                        logger.websocket.warning("⚠️ Goodbye already sent, ignoring duplicate request")
+                                else:
+                                    agent_question_repeat_count += 1
+                                    if agent_question_repeat_count <= 2:  # Limit to 2 repeats
+                                        logger.websocket.info(f"Unclear response to agent connect. Repeating question (attempt {agent_question_repeat_count}/2).")
+                                        logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                                        await play_agent_connect_question(websocket, call_detected_lang)
+                                        # Reset the timer to wait for user response
+                                        last_transcription_time = time.time()
+                                    else:
+                                        logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
+                                        logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
+                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
                                         conversation_stage = "TRANSFERRING_TO_AGENT"
                                         interaction_complete = True
-                                        
-                                    elif intent in ["dispute", "already_paid"]:
-                                        logger.websocket.info(f"Customer has {intent} - transferring to agent")
-                                        customer_number = customer_info.get('phone', '08438019383')
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number)
-                                        conversation_stage = "TRANSFERRING_TO_AGENT"
-                                        interaction_complete = True
-                                        
-                                    else:  # unclear
-                                        agent_question_repeat_count += 1
-                                        if agent_question_repeat_count <= 2:
-                                            logger.websocket.info(f"Unclear response. Repeating question (attempt {agent_question_repeat_count}/2)")
-                                            await play_agent_connect_question(websocket, call_detected_lang)
-                                            last_transcription_time = time.time()
-                                        else:
-                                            logger.websocket.info("Too many unclear responses - transferring to agent")
-                                            customer_number = customer_info.get('phone', '08438019383')
-                                            await play_transfer_to_agent(websocket, customer_number=customer_number)
-                                            conversation_stage = "TRANSFERRING_TO_AGENT"
-                                            interaction_complete = True
-                                    
-                                except Exception as e:
-                                    logger.websocket.error(f"❌ Error in Claude intent detection: {e}")
-                                    # Fallback to simple keyword detection
-                                    intent = detect_intent_fur(transcript, call_detected_lang)
-                                    logger.websocket.info(f"Fallback intent detection: {intent}")
-                                    
-                                    if intent == "affirmative":
-                                        customer_number = customer_info.get('phone', '08438019383')
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number)
-                                        conversation_stage = "TRANSFERRING_TO_AGENT"
-                                        interaction_complete = True
+                                        await websocket.close()
+                                        logger.websocket.info("🔒 WebSocket closed after auto agent transfer")
+                                        logger.log_call_event("WEBSOCKET_CLOSED_AUTO_TRANSFER", call_sid, customer_info['name'])
+                                        break
                             # Add more elif conditions here for additional conversation stages if your flow extends
                     except Exception as e:
                         logger.websocket.error(f"❌ Error processing transcript: {e}")
