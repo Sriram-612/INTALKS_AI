@@ -35,7 +35,7 @@ from services.call_management import call_service
 from utils import bedrock_client
 from utils.agent_transfer import trigger_exotel_agent_transfer
 from utils.logger import setup_application_logging, logger
-from utils.handler_asr import SarvamHandler
+from utils.production_asr import ProductionSarvamHandler
 from utils.redis_session import (init_redis, redis_manager,
                                  generate_websocket_session_id)
 
@@ -84,7 +84,7 @@ app.add_middleware(
 )
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
-sarvam_handler = SarvamHandler(SARVAM_API_KEY)
+sarvam_handler = ProductionSarvamHandler(SARVAM_API_KEY)
 
 # --- Constants ---
 BUFFER_DURATION_SECONDS = 1.0
@@ -225,8 +225,8 @@ async def greeting_template_play(websocket, customer_info, lang: str):
     greeting = GREETING_TEMPLATE.get(lang, GREETING_TEMPLATE["en-IN"]).format(name=customer_info.get('name', 'there'))
     logger.tts.info(f"🔁 Converting personalized greeting: {greeting}")
     
-    # Use direct TTS since greeting templates are already in target language
-    audio_bytes = await sarvam_handler.synthesize_tts_direct(greeting, lang)
+    # Use new TTS method that handles rate limiting and error recovery
+    audio_bytes = await sarvam_handler.synthesize_tts(greeting, lang)
     await stream_audio_to_websocket(websocket, audio_bytes)
 
 async def play_did_not_hear_response(websocket, lang: str):
@@ -248,7 +248,7 @@ async def play_emi_details_part1(websocket, customer_info, lang: str):
             due_date=customer_info.get('due_date', 'a recent date')
         )
         logger.tts.info(f"🔁 Converting EMI part 1: {prompt_text}")
-        audio_bytes = await sarvam_handler.synthesize_tts_direct(prompt_text, lang)
+        audio_bytes = await sarvam_handler.synthesize_tts(prompt_text, lang)
         await stream_audio_to_websocket(websocket, audio_bytes)
     except Exception as e:
         logger.tts.error(f"❌ Error in EMI part 1: {e}")
@@ -259,7 +259,7 @@ async def play_emi_details_part2(websocket, customer_info, lang: str):
     try:
         prompt_text = EMI_DETAILS_PART2_TEMPLATE.get(lang, EMI_DETAILS_PART2_TEMPLATE["en-IN"])
         logger.tts.info(f"🔁 Converting EMI part 2: {prompt_text}")
-        audio_bytes = await sarvam_handler.synthesize_tts_direct(prompt_text, lang)
+        audio_bytes = await sarvam_handler.synthesize_tts(prompt_text, lang)
         await stream_audio_to_websocket(websocket, audio_bytes)
     except Exception as e:
         logger.tts.error(f"❌ Error in EMI part 2: {e}")
@@ -269,14 +269,14 @@ async def play_agent_connect_question(websocket, lang: str):
     """Asks the user if they want to connect to a live agent."""
     prompt_text = AGENT_CONNECT_TEMPLATE.get(lang, AGENT_CONNECT_TEMPLATE["en-IN"])
     logger.tts.info(f"🔁 Converting agent connect question: {prompt_text}")
-    audio_bytes = await sarvam_handler.synthesize_tts_direct(prompt_text, lang)
+    audio_bytes = await sarvam_handler.synthesize_tts(prompt_text, lang)
     await stream_audio_to_websocket(websocket, audio_bytes)
 
 async def play_goodbye_after_decline(websocket, lang: str):
     """Plays a goodbye message if the user declines agent connection."""
     prompt_text = GOODBYE_TEMPLATE.get(lang, GOODBYE_TEMPLATE["en-IN"])
     logger.tts.info(f"🔁 Converting goodbye after decline: {prompt_text}")
-    audio_bytes = await sarvam_handler.synthesize_tts_direct(prompt_text, lang)
+    audio_bytes = await sarvam_handler.synthesize_tts(prompt_text, lang)
     await stream_audio_to_websocket(websocket, audio_bytes)
 
 # --- Language and Intent Detection ---
@@ -788,16 +788,27 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                 await play_transfer_to_agent(websocket, customer_number=customer_number) 
                                 conversation_stage = "TRANSFERRING_TO_AGENT"
                                 interaction_complete = True
-                                await websocket.close()
-                                logger.websocket.info("🔒 WebSocket closed after no-audio auto transfer")
-                                logger.log_call_event("WEBSOCKET_CLOSED_NO_AUDIO_TRANSFER", call_sid, customer_info['name'])
+                                # Wait for transfer message to be sent before ending loop
+                                await asyncio.sleep(2)
                                 break
                         audio_buffer.clear()
                         last_transcription_time = now
                         continue
 
                     try:
-                        transcript = sarvam_handler.transcribe_from_payload(audio_buffer)
+                        transcript = await sarvam_handler.transcribe_with_fallback(audio_buffer, customer_language=customer_info.get('lang') if customer_info else None)
+                        if isinstance(transcript, tuple):
+                            transcript_text, detected_language = transcript
+                            # Update the detected language if it was determined during transcription
+                            if detected_language and detected_language != "en-IN":
+                                call_detected_lang = detected_language
+                                logger.websocket.info(f"🌐 Language updated from transcription: {call_detected_lang}")
+                            transcript = transcript_text
+                        elif isinstance(transcript, str):
+                            # Fallback for older handler compatibility
+                            pass
+                        else:
+                            transcript = ""
                         logger.websocket.info(f"📝 Transcript: {transcript}")
                         logger.log_call_event("TRANSCRIPT_RECEIVED", call_sid, customer_info['name'], {"transcript": transcript, "stage": conversation_stage})
 
@@ -864,9 +875,8 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                         await play_transfer_to_agent(websocket, customer_number=customer_number) 
                                         conversation_stage = "TRANSFERRING_TO_AGENT"
                                         interaction_complete = True
-                                        await websocket.close()
-                                        logger.websocket.info("🔒 WebSocket closed after agent transfer")
-                                        logger.log_call_event("WEBSOCKET_CLOSED_AGENT_TRANSFER", call_sid, customer_info['name'])
+                                        # Wait for a moment before closing to ensure transfer message is sent
+                                        await asyncio.sleep(2)
                                         break
                                     else:
                                         logger.websocket.warning("⚠️ Agent transfer already in progress, ignoring duplicate request")
@@ -877,6 +887,9 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                         await play_goodbye_after_decline(websocket, call_detected_lang)
                                         conversation_stage = "GOODBYE_DECLINE"
                                         interaction_complete = True
+                                        # Wait for goodbye message to be sent before closing
+                                        await asyncio.sleep(3)
+                                        break
                                     else:
                                         logger.websocket.warning("⚠️ Goodbye already sent, ignoring duplicate request")
                                 else:
@@ -894,9 +907,8 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                         await play_transfer_to_agent(websocket, customer_number=customer_number) 
                                         conversation_stage = "TRANSFERRING_TO_AGENT"
                                         interaction_complete = True
-                                        await websocket.close()
-                                        logger.websocket.info("🔒 WebSocket closed after auto agent transfer")
-                                        logger.log_call_event("WEBSOCKET_CLOSED_AUTO_TRANSFER", call_sid, customer_info['name'])
+                                        # Wait for transfer message to be sent before closing
+                                        await asyncio.sleep(2)
                                         break
                             # Add more elif conditions here for additional conversation stages if your flow extends
                     except Exception as e:
@@ -910,8 +922,12 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
         logger.error.error(f"WebSocket compatibility error: {e}")
         logger.log_call_event("WEBSOCKET_COMPATIBILITY_ERROR", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown', {"error": str(e)})
     finally:
-        # Ensure the websocket is closed gracefully
+        # Ensure the websocket is closed gracefully only after conversation is complete
         try:
+            if not interaction_complete:
+                # If we're exiting due to an error before conversation completion, wait a bit
+                await asyncio.sleep(1)
+            
             if websocket.client_state.name not in ['DISCONNECTED']:
                 await websocket.close()
                 logger.websocket.info("🔒 WebSocket connection closed gracefully")
@@ -1139,9 +1155,28 @@ async def old_websocket_endpoint(websocket: WebSocket):
     agent_question_repeat_count = 0 # Track how many times agent question was repeated
     emi_delivery_in_progress = False # Flag to prevent premature WebSocket closure during EMI delivery
     session_id = None # Will be set from the start message
-
+    
+    # Call timeout mechanism
+    call_start_time = time.time()
+    max_call_duration = 600  # 10 minutes maximum call duration
+    
     try:
         while True:
+            # Check for call timeout
+            if time.time() - call_start_time > max_call_duration:
+                logger.websocket.warning(f"⏰ Call timeout reached ({max_call_duration}s) - ending call gracefully")
+                logger.log_call_event("CALL_TIMEOUT", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown')
+                if customer_info and not interaction_complete:
+                    # Play a quick timeout message
+                    try:
+                        timeout_msg = GOODBYE_TEMPLATE.get(call_detected_lang, GOODBYE_TEMPLATE["en-IN"])
+                        audio_bytes = await sarvam_handler.synthesize_tts(timeout_msg, call_detected_lang)
+                        await stream_audio_to_websocket(websocket, audio_bytes)
+                        await asyncio.sleep(2)  # Wait for message to play
+                    except Exception as e:
+                        logger.tts.error(f"❌ Error playing timeout message: {e}")
+                interaction_complete = True
+                break
             data = await websocket.receive_text()
             msg = json.loads(data)
             event_type = msg.get('event', 'unknown')
@@ -1291,12 +1326,158 @@ async def old_websocket_endpoint(websocket: WebSocket):
                         logger.log_call_event("FALLBACK_GREETING_ERROR", call_sid, customer_info['name'], {"error": str(fallback_e)})
                 continue
 
+            if msg.get("event") == "stop":
+                logger.websocket.info("🛑 Received stop event from Twilio/Exotel")
+                # Don't break the loop immediately - only if conversation is complete
+                if interaction_complete:
+                    logger.websocket.info("✅ Conversation already complete, processing stop event")
+                    break
+                else:
+                    logger.websocket.info("⚠️ Stop event received but conversation not complete - ignoring for now")
+                    # Log the stop event but continue processing
+                    logger.log_call_event("STOP_EVENT_IGNORED", call_sid, customer_info['name'] if customer_info else 'Unknown', 
+                                        {"reason": "conversation_not_complete", "stage": conversation_stage})
+                    continue
+
+            if msg.get("event") == "media":
+                payload_b64 = msg["media"]["payload"]
+                raw_audio = base64.b64decode(payload_b64)
+
+                if interaction_complete:
+                    continue
+
+                if raw_audio and any(b != 0 for b in raw_audio):
+                    audio_buffer.extend(raw_audio)
+                
+                now = time.time()
+
+                if now - last_transcription_time >= BUFFER_DURATION_SECONDS:
+                    if len(audio_buffer) == 0:
+                        if conversation_stage == "WAITING_FOR_LANG_DETECT":
+                            logger.websocket.info("No audio received during language detection stage. Playing 'didn't hear' prompt.")
+                            logger.log_call_event("NO_AUDIO_LANG_DETECT", call_sid, customer_info['name'])
+                            await play_did_not_hear_response(websocket, call_detected_lang)
+                            last_transcription_time = time.time()
+                        elif conversation_stage == "WAITING_AGENT_RESPONSE":
+                            agent_question_repeat_count += 1
+                            if agent_question_repeat_count <= 2:
+                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
+                                logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                                await play_agent_connect_question(websocket, call_detected_lang)
+                                last_transcription_time = time.time()
+                            else:
+                                logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
+                                logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
+                                customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                conversation_stage = "TRANSFERRING_TO_AGENT"
+                                interaction_complete = True
+                                await asyncio.sleep(2)
+                                break
+                        audio_buffer.clear()
+                        last_transcription_time = now
+                        continue
+
+                    try:
+                        transcript = await sarvam_handler.transcribe_with_fallback(audio_buffer, customer_language=customer_info.get('lang') if customer_info else None)
+                        if isinstance(transcript, tuple):
+                            transcript_text, detected_language = transcript
+                            if detected_language and detected_language != "en-IN":
+                                call_detected_lang = detected_language
+                                logger.websocket.info(f"🌐 Language updated from transcription: {call_detected_lang}")
+                            transcript = transcript_text
+                        elif isinstance(transcript, str):
+                            pass
+                        else:
+                            transcript = ""
+                        
+                        logger.websocket.info(f"📝 Transcript: {transcript}")
+                        logger.log_call_event("TRANSCRIPT_RECEIVED", call_sid, customer_info['name'], {"transcript": transcript, "stage": conversation_stage})
+
+                        if transcript:
+                            if conversation_stage == "WAITING_FOR_LANG_DETECT":
+                                call_detected_lang = detect_language(transcript)
+                                logger.websocket.info(f"2. Detected Language from user response: {call_detected_lang}")
+                                logger.log_call_event("LANGUAGE_DETECTED", call_sid, customer_info['name'], {"detected_lang": call_detected_lang})
+                                
+                                try:
+                                    await play_emi_details_part1(websocket, customer_info or {}, call_detected_lang)
+                                    await play_emi_details_part2(websocket, customer_info or {}, call_detected_lang)
+                                    await play_agent_connect_question(websocket, call_detected_lang)
+                                    conversation_stage = "WAITING_AGENT_RESPONSE"
+                                    logger.tts.info(f"✅ EMI details and agent question sent successfully in {call_detected_lang}")
+                                    logger.log_call_event("EMI_DETAILS_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
+                                except Exception as e:
+                                    logger.tts.error(f"❌ Error playing EMI details: {e}")
+                                    logger.log_call_event("EMI_DETAILS_ERROR", call_sid, customer_info['name'], {"error": str(e)})
+                            
+                            elif conversation_stage == "WAITING_AGENT_RESPONSE":
+                                try:
+                                    intent = detect_intent_with_claude(transcript, call_detected_lang)
+                                    logger.websocket.info(f"Claude detected intent: {intent}")
+                                    logger.log_call_event("INTENT_DETECTED_CLAUDE", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript})
+                                except Exception as e:
+                                    logger.websocket.error(f"❌ Error in Claude intent detection: {e}")
+                                    intent = detect_intent_fur(transcript, call_detected_lang)
+                                    logger.websocket.info(f"Fallback intent detection: {intent}")
+                                    logger.log_call_event("INTENT_DETECTED_FALLBACK", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript})
+
+                                if intent == "affirmative" or intent == "agent_transfer":
+                                    if conversation_stage != "TRANSFERRING_TO_AGENT":
+                                        logger.websocket.info("User affirmed agent transfer. Initiating transfer.")
+                                        logger.log_call_event("AGENT_TRANSFER_INITIATED", call_sid, customer_info['name'], {"intent": intent})
+                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                        conversation_stage = "TRANSFERRING_TO_AGENT"
+                                        interaction_complete = True
+                                        await asyncio.sleep(2)
+                                        break
+                                    else:
+                                        logger.websocket.warning("⚠️ Agent transfer already in progress, ignoring duplicate request")
+                                elif intent == "negative":
+                                    if conversation_stage != "GOODBYE_DECLINE":
+                                        logger.websocket.info("User declined agent transfer. Saying goodbye.")
+                                        logger.log_call_event("AGENT_TRANSFER_DECLINED", call_sid, customer_info['name'])
+                                        await play_goodbye_after_decline(websocket, call_detected_lang)
+                                        conversation_stage = "GOODBYE_DECLINE"
+                                        interaction_complete = True
+                                        await asyncio.sleep(3)
+                                        break
+                                    else:
+                                        logger.websocket.warning("⚠️ Goodbye already sent, ignoring duplicate request")
+                                else:
+                                    agent_question_repeat_count += 1
+                                    if agent_question_repeat_count <= 2:
+                                        logger.websocket.info(f"Unclear response to agent connect. Repeating question (attempt {agent_question_repeat_count}/2).")
+                                        logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                                        await play_agent_connect_question(websocket, call_detected_lang)
+                                        last_transcription_time = time.time()
+                                    else:
+                                        logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
+                                        logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
+                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                        conversation_stage = "TRANSFERRING_TO_AGENT"
+                                        interaction_complete = True
+                                        await asyncio.sleep(2)
+                                        break
+                    except Exception as e:
+                        logger.websocket.error(f"❌ Error processing transcript: {e}")
+                        logger.log_call_event("TRANSCRIPT_PROCESSING_ERROR", call_sid, customer_info['name'] if customer_info else 'Unknown', {"error": str(e)})
+
+                    audio_buffer.clear()
+                    last_transcription_time = now
+
     except Exception as e:
         logger.error.error(f"WebSocket compatibility error: {e}")
         logger.log_call_event("WEBSOCKET_COMPATIBILITY_ERROR", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown', {"error": str(e)})
     finally:
-        # Ensure the websocket is closed gracefully
+        # Ensure the websocket is closed gracefully only after conversation is complete
         try:
+            if not interaction_complete:
+                # If we're exiting due to an error before conversation completion, wait a bit
+                await asyncio.sleep(1)
+            
             if websocket.client_state.name not in ['DISCONNECTED']:
                 await websocket.close()
                 logger.websocket.info("🔒 WebSocket connection closed gracefully")
