@@ -94,7 +94,7 @@ class FileUpload(Base):
     processing_errors = Column(JSON)  # Store any processing errors
 
 # Database connection and session management
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:tFAVXBihcTBZuPoEzKprvpNBSqQVyRks@tramway.proxy.rlwy.net:17798/railway')
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:IntalksAI07@db-voice-agent.cviea4aicss0.ap-south-1.rds.amazonaws.com:5432/db-voice-agent')
 
 class DatabaseManager:
     def __init__(self):

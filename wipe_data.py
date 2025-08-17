@@ -63,7 +63,7 @@ def wipe_postgresql_data():
     
     try:
         # Initialize database connection
-        DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:Kushal07@localhost/voice_assistant_db')
+        DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:IntalksAI07@db-voice-agent.cviea4aicss0.ap-south-1.rds.amazonaws.com:5432/db-voice-agent')
         engine = create_engine(DATABASE_URL, echo=False)
         
         # Create session

@@ -24,7 +24,7 @@ def create_backup():
     print(f"🗂️  Creating backup at {timestamp}...")
     
     # Parse database URL
-    db_url = os.getenv('DATABASE_URL', 'postgresql://postgres:Kushal07@localhost/voice_assistant_db')
+    db_url = os.getenv('DATABASE_URL', 'postgresql://postgres:IntalksAI07@db-voice-agent.cviea4aicss0.ap-south-1.rds.amazonaws.com:5432/db-voice-agent')
     
     # Extract database info from URL
     # Format: postgresql://user:pass@host:port/dbname
