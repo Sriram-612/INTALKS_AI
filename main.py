@@ -429,9 +429,9 @@ templates = Jinja2Templates(directory="static")
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
     """
-    Serves the enhanced dashboard HTML file at the root URL.
+    Serves the improved dashboard HTML file at the root URL.
     """
-    return templates.TemplateResponse("enhanced_dashboard.html", {"request": request})
+    return templates.TemplateResponse("index.html", {"request": request})
 
 @app.get("/original", response_class=HTMLResponse)
 async def get_original_dashboard(request: Request):
