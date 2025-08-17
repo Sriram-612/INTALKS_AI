@@ -297,16 +297,51 @@ def _is_gurmukhi(text):
 
 def detect_language(text):
     text = text.strip().lower()
-    if any(word in text for word in ["नमस्ते", "हां", "नहीं"]) or _is_devanagari(text): return "hi-IN"
-    if any(word in text for word in ["வணக்கம்", "ஆம்", "இல்லை"]) or _is_tamil(text): return "ta-IN"
-    if any(word in text for word in ["హాయ్", "అవును", "కాదు"]) or _is_telugu(text): return "te-IN"
-    if any(word in text for word in ["ಹೆಲೋ", "ಹೌದು", "ಇಲ್ಲ"]) or _is_kannada(text): return "kn-IN"
-    if any(word in text for word in ["നമസ്കാരം", "അതെ", "ഇല്ല"]) or _is_malayalam(text): return "ml-IN"
-    if any(word in text for word in ["નમસ્તે", "હા", "ના"]) or _is_gujarati(text): return "gu-IN"
-    if any(word in text for word in ["नमस्कार", "होय", "नाही"]) or _is_marathi(text): return "mr-IN"
-    if any(word in text for word in ["নমস্কার", "হ্যাঁ", "না"]) or _is_bengali(text): return "bn-IN"
-    if any(word in text for word in ["ਸਤ ਸ੍ਰੀ ਅਕਾਲ", "ਹਾਂ", "ਨਹੀਂ"]) or _is_punjabi(text): return "pa-IN"
-    if any(word in text for word in ["ନମସ୍କାର", "ହଁ", "ନା"]) or _is_oriya(text): return "or-IN"
+    
+    # Enhanced English detection - check for common English words first
+    english_words = [
+        "yes", "yeah", "yep", "sure", "okay", "ok", "alright", "right", 
+        "no", "nah", "nope", "not", "never",
+        "hello", "hi", "hey", "good", "morning", "afternoon", "evening",
+        "please", "thank", "thanks", "welcome", "sorry", "excuse",
+        "what", "where", "when", "why", "how", "who", "which",
+        "can", "could", "would", "should", "will", "shall", "may", "might",
+        "i", "me", "my", "you", "your", "we", "our", "they", "their",
+        "speak", "talk", "call", "phone", "agent", "person", "someone",
+        "help", "support", "assistance", "service", "transfer", "connect"
+    ]
+    
+    # Check if text contains primarily English words
+    words = text.split()
+    english_word_count = sum(1 for word in words if word in english_words)
+    
+    # If majority of words are English, return English
+    if words and english_word_count >= len(words) * 0.5:  # At least 50% English words
+        return "en-IN"
+    
+    # Check for specific language indicators
+    if any(word in text for word in ["नमस्ते", "हां", "नहीं", "हाँ", "जी", "अच्छा"]) or _is_devanagari(text): 
+        return "hi-IN"
+    if any(word in text for word in ["வணக்கம்", "ஆம்", "இல்லை"]) or _is_tamil(text): 
+        return "ta-IN"
+    if any(word in text for word in ["హాయ్", "అవును", "కాదు"]) or _is_telugu(text): 
+        return "te-IN"
+    if any(word in text for word in ["ಹೆಲೋ", "ಹೌದು", "ಇಲ್ಲ"]) or _is_kannada(text): 
+        return "kn-IN"
+    if any(word in text for word in ["നമസ്കാരം", "അതെ", "ഇല്ല"]) or _is_malayalam(text): 
+        return "ml-IN"
+    if any(word in text for word in ["નમસ્તે", "હા", "ના"]) or _is_gujarati(text): 
+        return "gu-IN"
+    if any(word in text for word in ["नमस्कार", "होय", "नाही"]) or _is_marathi(text): 
+        return "mr-IN"
+    if any(word in text for word in ["নমস্কার", "হ্যাঁ", "না"]) or _is_bengali(text): 
+        return "bn-IN"
+    if any(word in text for word in ["ਸਤ ਸ੍ਰੀ ਅਕਾਲ", "ਹਾਂ", "ਨਹੀਂ"]) or _is_punjabi(text): 
+        return "pa-IN"
+    if any(word in text for word in ["ନମସ୍କାର", "ହଁ", "ନା"]) or _is_oriya(text): 
+        return "or-IN"
+    
+    # Default to English if no specific language detected
     return "en-IN"
 
 def detect_intent_with_claude(transcript: str, lang: str) -> str:
@@ -814,33 +849,59 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
 
                         if transcript:
                             if conversation_stage == "WAITING_FOR_LANG_DETECT":
-                                call_detected_lang = detect_language(transcript)
-                                logger.websocket.info(f"2. Detected Language from user response: {call_detected_lang}")
-                                logger.websocket.info(f"State-based language: {initial_greeting_language}")
-                                logger.websocket.info(f"CSV language: {csv_language}")
-                                logger.log_call_event("LANGUAGE_DETECTED", call_sid, customer_info['name'], {"detected_lang": call_detected_lang, "original_lang": customer_info.get('lang', 'en-IN')})
-                                final_language = call_detected_lang
+                                # Detect user's preferred language from their response
+                                user_detected_lang = detect_language(transcript)
+                                logger.websocket.info(f"🎯 User Response Language Detection:")
+                                logger.websocket.info(f"   📍 State-mapped language: {initial_greeting_language}")
+                                logger.websocket.info(f"   🗣️  User detected language: {user_detected_lang}")
+                                logger.websocket.info(f"   📄 CSV language: {csv_language}")
+                                logger.log_call_event("LANGUAGE_DETECTED", call_sid, customer_info['name'], {
+                                    "detected_lang": user_detected_lang, 
+                                    "state_lang": initial_greeting_language,
+                                    "csv_lang": csv_language,
+                                    "transcript": transcript
+                                })
                                 
-                                # If user detected language is different from state language, acknowledge the switch
-                                if call_detected_lang != initial_greeting_language:
-                                    logger.websocket.info(f"User language ({call_detected_lang}) differs from state language ({initial_greeting_language}). Switching to user language.")
-                                    logger.log_call_event("LANGUAGE_MISMATCH_REPLAY", call_sid, customer_info['name'], {"new_lang": call_detected_lang})
-                                    # Optionally replay greeting in detected language
+                                # Enhanced Language Switching Logic
+                                if user_detected_lang != initial_greeting_language:
+                                    logger.websocket.info(f"🔄 Language Mismatch Detected!")
+                                    logger.websocket.info(f"   Initial greeting was in: {initial_greeting_language}")
+                                    logger.websocket.info(f"   User responded in: {user_detected_lang}")
+                                    logger.websocket.info(f"   🔄 Switching entire conversation to: {user_detected_lang}")
+                                    logger.log_call_event("LANGUAGE_SWITCH_DETECTED", call_sid, customer_info['name'], {
+                                        "from_lang": initial_greeting_language,
+                                        "to_lang": user_detected_lang,
+                                        "reason": "user_preference"
+                                    })
+                                    
+                                    # Replay greeting in user's preferred language
                                     try:
-                                        await greeting_template_play(websocket, customer_info, lang=call_detected_lang)
-                                        logger.websocket.info(f"✅ Replayed greeting in detected language: {call_detected_lang}")
+                                        logger.websocket.info(f"🔁 Replaying greeting in user's language: {user_detected_lang}")
+                                        await greeting_template_play(websocket, customer_info, lang=user_detected_lang)
+                                        logger.websocket.info(f"✅ Successfully replayed greeting in {user_detected_lang}")
+                                        logger.log_call_event("GREETING_REPLAYED_NEW_LANG", call_sid, customer_info['name'], {"new_lang": user_detected_lang})
+                                        
+                                        # Update the conversation language to user's preference
+                                        call_detected_lang = user_detected_lang
+                                        
+                                        # Give user a moment to acknowledge the language switch
+                                        await asyncio.sleep(1)
+                                        
                                     except Exception as e:
-                                        logger.websocket.error(f"❌ Error replaying greeting in detected language: {e}")
+                                        logger.websocket.error(f"❌ Error replaying greeting in {user_detected_lang}: {e}")
+                                        logger.log_call_event("GREETING_REPLAY_ERROR", call_sid, customer_info['name'], {"error": str(e)})
+                                        # Fallback to user's detected language anyway
+                                        call_detected_lang = user_detected_lang
+                                        
                                 else:
-                                    logger.websocket.info(f"User language matches state language. Continuing with {final_language}")
+                                    logger.websocket.info(f"✅ Language Consistency Confirmed!")
+                                    logger.websocket.info(f"   User responded in same language as greeting: {user_detected_lang}")
+                                    logger.log_call_event("LANGUAGE_CONSISTENT", call_sid, customer_info['name'], {"language": user_detected_lang})
+                                    call_detected_lang = user_detected_lang
                                 
-                                # If no specific language detected, fallback to state language
-                                if call_detected_lang == "en-IN" and initial_greeting_language != "en-IN":
-                                    logger.websocket.info(f"No specific language detected from user. Using state language: {initial_greeting_language}")
-                                    final_language = initial_greeting_language
-                                
-                                # Update the detected language for further conversation
-                                call_detected_lang = final_language
+                                # Final language confirmation
+                                logger.websocket.info(f"🎉 Final Conversation Language: {call_detected_lang}")
+                                logger.log_call_event("FINAL_LANGUAGE_SET", call_sid, customer_info['name'], {"final_lang": call_detected_lang})
                                 
                                 # Play EMI details in final determined language
                                 try:
@@ -1300,13 +1361,24 @@ async def old_websocket_endpoint(websocket: WebSocket):
                 
                 print(f"[Compatibility] ✅ Customer data validated: {customer_info['name']} - Loan: {customer_info['loan_id']}, Amount: ₹{customer_info['amount']}")
                 
+                # Initialize language variables for enhanced language detection
+                csv_language = customer_info.get('lang', 'en-IN')
+                state_language = get_initial_language_from_state(customer_info.get('state', ''))
+                initial_greeting_language = csv_language if csv_language and csv_language != 'en-IN' else state_language
+                call_detected_lang = initial_greeting_language
+                
+                logger.websocket.info(f"🌐 Language Configuration:")
+                logger.websocket.info(f"   📄 CSV Language: {csv_language}")
+                logger.websocket.info(f"   📍 State Language: {state_language}")
+                logger.websocket.info(f"   🎯 Initial Greeting Language: {initial_greeting_language}")
+                
                 # Play initial greeting immediately when WebSocket starts
-                logger.tts.info(f"1. Playing initial greeting for {customer_info['name']} in {customer_info['lang']}")
-                logger.log_call_event("INITIAL_GREETING_START", call_sid, customer_info['name'], {"language": customer_info['lang']})
+                logger.tts.info(f"1. Playing initial greeting for {customer_info['name']} in {initial_greeting_language}")
+                logger.log_call_event("INITIAL_GREETING_START", call_sid, customer_info['name'], {"language": initial_greeting_language})
                 try:
-                    await greeting_template_play(websocket, customer_info, lang=customer_info['lang'])
-                    logger.tts.info(f"✅ Initial greeting played successfully in {customer_info['lang']}")
-                    logger.log_call_event("INITIAL_GREETING_SUCCESS", call_sid, customer_info['name'], {"language": customer_info['lang']})
+                    await greeting_template_play(websocket, customer_info, lang=initial_greeting_language)
+                    logger.tts.info(f"✅ Initial greeting played successfully in {initial_greeting_language}")
+                    logger.log_call_event("INITIAL_GREETING_SUCCESS", call_sid, customer_info['name'], {"language": initial_greeting_language})
                     initial_greeting_played = True
                     conversation_stage = "WAITING_FOR_LANG_DETECT"
                 except Exception as e:
@@ -1396,9 +1468,59 @@ async def old_websocket_endpoint(websocket: WebSocket):
 
                         if transcript:
                             if conversation_stage == "WAITING_FOR_LANG_DETECT":
-                                call_detected_lang = detect_language(transcript)
-                                logger.websocket.info(f"2. Detected Language from user response: {call_detected_lang}")
-                                logger.log_call_event("LANGUAGE_DETECTED", call_sid, customer_info['name'], {"detected_lang": call_detected_lang})
+                                # Detect user's preferred language from their response
+                                user_detected_lang = detect_language(transcript)
+                                logger.websocket.info(f"🎯 User Response Language Detection:")
+                                logger.websocket.info(f"   📍 State-mapped language: {initial_greeting_language}")
+                                logger.websocket.info(f"   🗣️  User detected language: {user_detected_lang}")
+                                logger.websocket.info(f"   📄 CSV language: {csv_language}")
+                                logger.log_call_event("LANGUAGE_DETECTED", call_sid, customer_info['name'], {
+                                    "detected_lang": user_detected_lang, 
+                                    "state_lang": initial_greeting_language,
+                                    "csv_lang": csv_language,
+                                    "transcript": transcript
+                                })
+                                
+                                # Enhanced Language Switching Logic
+                                if user_detected_lang != initial_greeting_language:
+                                    logger.websocket.info(f"🔄 Language Mismatch Detected!")
+                                    logger.websocket.info(f"   Initial greeting was in: {initial_greeting_language}")
+                                    logger.websocket.info(f"   User responded in: {user_detected_lang}")
+                                    logger.websocket.info(f"   🔄 Switching entire conversation to: {user_detected_lang}")
+                                    logger.log_call_event("LANGUAGE_SWITCH_DETECTED", call_sid, customer_info['name'], {
+                                        "from_lang": initial_greeting_language,
+                                        "to_lang": user_detected_lang,
+                                        "reason": "user_preference"
+                                    })
+                                    
+                                    # Replay greeting in user's preferred language
+                                    try:
+                                        logger.websocket.info(f"🔁 Replaying greeting in user's language: {user_detected_lang}")
+                                        await greeting_template_play(websocket, customer_info, lang=user_detected_lang)
+                                        logger.websocket.info(f"✅ Successfully replayed greeting in {user_detected_lang}")
+                                        logger.log_call_event("GREETING_REPLAYED_NEW_LANG", call_sid, customer_info['name'], {"new_lang": user_detected_lang})
+                                        
+                                        # Update the conversation language to user's preference
+                                        call_detected_lang = user_detected_lang
+                                        
+                                        # Give user a moment to acknowledge the language switch
+                                        await asyncio.sleep(1)
+                                        
+                                    except Exception as e:
+                                        logger.websocket.error(f"❌ Error replaying greeting in {user_detected_lang}: {e}")
+                                        logger.log_call_event("GREETING_REPLAY_ERROR", call_sid, customer_info['name'], {"error": str(e)})
+                                        # Fallback to user's detected language anyway
+                                        call_detected_lang = user_detected_lang
+                                        
+                                else:
+                                    logger.websocket.info(f"✅ Language Consistency Confirmed!")
+                                    logger.websocket.info(f"   User responded in same language as greeting: {user_detected_lang}")
+                                    logger.log_call_event("LANGUAGE_CONSISTENT", call_sid, customer_info['name'], {"language": user_detected_lang})
+                                    call_detected_lang = user_detected_lang
+                                
+                                # Final language confirmation
+                                logger.websocket.info(f"🎉 Final Conversation Language: {call_detected_lang}")
+                                logger.log_call_event("FINAL_LANGUAGE_SET", call_sid, customer_info['name'], {"final_lang": call_detected_lang})
                                 
                                 try:
                                     await play_emi_details_part1(websocket, customer_info or {}, call_detected_lang)
