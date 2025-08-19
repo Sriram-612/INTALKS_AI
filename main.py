@@ -182,8 +182,30 @@ async def play_transfer_to_agent(websocket, customer_number: str):
     else:
         logger.error.error("Could not initiate agent transfer. Missing customer_number or agent_number.")
 
-
+CHUNK_SIZE = 1600  
 async def stream_audio_to_websocket(websocket, audio_bytes):
+    print("stream_audio_to_websocket")
+    if not audio_bytes:
+        print("[stream_audio_to_websocket] ❌ No audio bytes to stream.")
+        return
+    #CHUNK_SIZE=1600
+    duration_ms = len(audio_bytes) / 16000 * 1000  # 16kBps → ~8kHz mono SLIN
+    for i in range(0, len(audio_bytes), CHUNK_SIZE):
+        chunk = audio_bytes[i:i + CHUNK_SIZE]
+        if not chunk:
+            continue
+        b64_chunk = base64.b64encode(chunk).decode("utf-8")
+        response_msg = {
+            "event": "media",
+            "media": {"payload": b64_chunk}
+        }
+        await websocket.send_json(response_msg)
+        await asyncio.sleep(0.02)  # simulate real-time playback
+    # ✅ Wait for the audio to fully play out before next message
+    print(f"[stream_audio_to_websocket] Waiting for audio to finish: {duration_ms:.0f}ms")
+      # add buffer
+
+async def stream_audio_to_websocket_not_working(websocket, audio_bytes):
     CHUNK_SIZE = 8000  # Send 1 second of audio at a time
     if not audio_bytes:
         logger.error.warning("No audio bytes to stream.")
@@ -831,7 +853,7 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                         continue
 
                     try:
-                        transcript = await sarvam_handler.transcribe_with_fallback(audio_buffer, customer_language=customer_info.get('lang') if customer_info else None)
+                        transcript = await sarvam_handler.transcribe_from_payload(audio_buffer)
                         if isinstance(transcript, tuple):
                             transcript_text, detected_language = transcript
                             # Update the detected language if it was determined during transcription
@@ -1451,7 +1473,7 @@ async def old_websocket_endpoint(websocket: WebSocket):
                         continue
 
                     try:
-                        transcript = await sarvam_handler.transcribe_with_fallback(audio_buffer, customer_language=customer_info.get('lang') if customer_info else None)
+                        transcript = await sarvam_handler.transcribe_from_payload(audio_buffer)
                         if isinstance(transcript, tuple):
                             transcript_text, detected_language = transcript
                             if detected_language and detected_language != "en-IN":

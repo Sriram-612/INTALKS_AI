@@ -673,7 +673,7 @@ class CallManagementService:
             'TimeLimit': '3600',
             'TimeOut': '30',
             'CustomField': custom_field_str,
-            'StatusCallback': f"{os.getenv('BASE_URL', 'http://localhost:8000')}/exotel-webhook"
+            'StatusCallback': f"{os.getenv('BASE_URL', 'https://3.108.35.213')}/exotel-webhook"
         }
         
         print(f"🎯 [CHECKPOINT] Payload validation:")
