@@ -88,6 +88,8 @@ sarvam_handler = ProductionSarvamHandler(SARVAM_API_KEY)
 
 # --- Constants ---
 BUFFER_DURATION_SECONDS = 1.0
+AGENT_RESPONSE_BUFFER_DURATION = 3.0  # Wait longer for user to answer agent connect question
+MIN_AUDIO_BYTES = 3200  # ~0.2s at 8kHz 16-bit mono; ignore too-short buffers
 
 # --- Multilingual Prompt Templates with SSML and Pauses ---
 GREETING_TEMPLATE = {
@@ -182,7 +184,7 @@ async def play_transfer_to_agent(websocket, customer_number: str):
     else:
         logger.error.error("Could not initiate agent transfer. Missing customer_number or agent_number.")
 
-CHUNK_SIZE = 1600  
+CHUNK_SIZE = 1600
 async def stream_audio_to_websocket(websocket, audio_bytes):
     print("stream_audio_to_websocket")
     if not audio_bytes:
@@ -199,11 +201,20 @@ async def stream_audio_to_websocket(websocket, audio_bytes):
             "event": "media",
             "media": {"payload": b64_chunk}
         }
-        await websocket.send_json(response_msg)
+        # Guard against sending after close
+        try:
+            state = getattr(getattr(websocket, 'client_state', None), 'name', 'CONNECTED')
+            if state not in ['CONNECTED', 'CONNECTING']:
+                print(f"[stream_audio_to_websocket] WebSocket not connected (state={state}). Stopping stream.")
+                break
+            await websocket.send_json(response_msg)
+        except Exception as _e:
+            print(f"[stream_audio_to_websocket] Send failed: {_e}")
+            break
         await asyncio.sleep(0.02)  # simulate real-time playback
-    # ✅ Wait for the audio to fully play out before next message
-    print(f"[stream_audio_to_websocket] Waiting for audio to finish: {duration_ms:.0f}ms")
-      # add buffer
+    # Provide a tiny cushion only; chunk pacing already matched duration
+    print(f"[stream_audio_to_websocket] Streamed ~{duration_ms:.0f}ms of audio (paced)")
+    await asyncio.sleep(0.1)
 
 async def stream_audio_to_websocket_not_working(websocket, audio_bytes):
     CHUNK_SIZE = 8000  # Send 1 second of audio at a time
@@ -367,21 +378,51 @@ def detect_language(text):
     return "en-IN"
 
 def detect_intent_with_claude(transcript: str, lang: str) -> str:
-    """Detects intent using the Claude model via the bedrock_client."""
+    """Detect intent for agent handoff using Claude via Bedrock. Returns 'affirmative'|'negative'|'unclear'."""
     logger.websocket.info(f"Getting intent for: '{transcript}'")
     try:
-        # The bedrock_client expects a chat history list of dicts
-        chat_history = [{"role": "user", "content": transcript}]
-        response = bedrock_client.get_intent_from_text(chat_history)
-        
-        # The response from the bedrock client is a dictionary, we need to extract the intent.
-        # Based on the likely structure, it might be under a key like 'intent'.
-        intent = response.get("intent", "unknown")
-        logger.websocket.info(f"Detected intent: {intent}")
-        return intent
+        # Build a precise, deterministic prompt for agent-handoff classification
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "You are classifying a user's short reply to this question: "
+                            "'Would you like me to connect you to one of our agents to assist you better?'\n\n"
+                            f"User reply (language={lang}): '{transcript}'\n\n"
+                            "Classify strictly into one of: affirmative, negative, unclear.\n"
+                            "- affirmative: yes/okay/sure/हाँ/ஆம்/etc (wants connection)\n"
+                            "- negative: no/not now/नहीं/இல்லை/etc (does not want)\n"
+                            "- unclear: ambiguous filler or unrelated\n\n"
+                            "Respond with only one word: affirmative | negative | unclear"
+                        ),
+                    }
+                ],
+            }
+        ]
+
+        # bedrock_client.invoke_claude_model returns a plain string
+        response_text = bedrock_client.invoke_claude_model(messages)
+        intent = (response_text or "").strip().lower()
+
+        # Normalize and validate
+        if intent in ("affirmative", "negative", "unclear"):
+            logger.websocket.info(f"Detected intent: {intent}")
+            return intent
+        # Try to infer if Claude returned a phrase
+        if "affirmative" in intent:
+            logger.websocket.info("Detected intent (normalized): affirmative")
+            return "affirmative"
+        if "negative" in intent:
+            logger.websocket.info("Detected intent (normalized): negative")
+            return "negative"
+        logger.websocket.warning(f"Claude returned unexpected text: {intent}; defaulting to 'unclear'")
+        return "unclear"
     except Exception as e:
         logger.websocket.error(f"❌ Error detecting intent with Claude: {e}")
-        return "unknown"
+        return "unclear"
 
 def detect_intent_fur(text: str, lang: str) -> str:
     """A fallback intent detection function (a more descriptive name for the original detect_intent)."""
@@ -822,7 +863,10 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                 
                 now = time.time()
 
-                if now - last_transcription_time >= BUFFER_DURATION_SECONDS:
+                # Stage-specific buffer timeout: wait longer for agent response
+                buffer_timeout = AGENT_RESPONSE_BUFFER_DURATION if conversation_stage == "WAITING_AGENT_RESPONSE" else BUFFER_DURATION_SECONDS
+
+                if now - last_transcription_time >= buffer_timeout:
                     if len(audio_buffer) == 0:
                         if conversation_stage == "WAITING_FOR_LANG_DETECT":
                             logger.websocket.info("No audio received during language detection stage. Playing 'didn't hear' prompt.")
@@ -853,6 +897,11 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                         continue
 
                     try:
+                        # Ignore too-short buffers that yield empty transcripts
+                        if len(audio_buffer) < MIN_AUDIO_BYTES:
+                            audio_buffer.clear()
+                            last_transcription_time = now
+                            continue
                         transcript = await sarvam_handler.transcribe_from_payload(audio_buffer)
                         if isinstance(transcript, tuple):
                             transcript_text, detected_language = transcript
