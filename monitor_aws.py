@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = os.getenv('BASE_URL', 'http://3.108.35.213:8000')
+BASE_URL = os.getenv('BASE_URL', 'https://31cafa13a316.ngrok-free.app')
 
 def check_system_resources():
     """Check system CPU, memory, and disk usage"""

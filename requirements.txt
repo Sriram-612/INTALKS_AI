@@ -28,6 +28,15 @@ requests>=2.31.0
 
 # Data Processing & File Handling
 pandas>=2.0.0
+
+# Authentication & JWT
+PyJWT>=2.8.0
+cryptography>=41.0.0
+
+# System Monitoring
+psutil>=5.9.0
+
+# =============================================================================
 openpyxl>=3.1.0
 xlsxwriter>=3.1.0
 
@@ -42,6 +51,10 @@ SpeechRecognition>=3.10.0
 # AI/ML Services
 sarvamai>=0.1.0
 boto3>=1.29.0
+
+# Authentication & Security
+PyJWT>=2.8.0
+cryptography>=41.0.0
 
 # Environment & Configuration
 python-dotenv>=1.0.0

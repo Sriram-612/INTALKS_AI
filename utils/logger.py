@@ -155,6 +155,35 @@ class VoiceAssistantLogger:
         self.websocket_json = websocket_json_logger
         self.call_json = call_json_logger
     
+    # Standard logging methods that delegate to app logger
+    def debug(self, message, *args, **kwargs):
+        """Log debug message"""
+        self.app.debug(message, *args, **kwargs)
+    
+    def info(self, message, *args, **kwargs):
+        """Log info message"""
+        self.app.info(message, *args, **kwargs)
+    
+    def warning(self, message, *args, **kwargs):
+        """Log warning message"""
+        self.app.warning(message, *args, **kwargs)
+    
+    def error(self, message, *args, **kwargs):
+        """Log error message"""
+        self.app.error(message, *args, **kwargs)
+        # Also log to dedicated error logger
+        error_logger.error(message, *args, **kwargs)
+    
+    def critical(self, message, *args, **kwargs):
+        """Log critical message"""
+        self.app.critical(message, *args, **kwargs)
+        error_logger.critical(message, *args, **kwargs)
+    
+    def exception(self, message, *args, **kwargs):
+        """Log exception with traceback"""
+        self.app.exception(message, *args, **kwargs)
+        error_logger.exception(message, *args, **kwargs)
+    
     def log_websocket_message(self, message_type, data, call_sid=None, session_id=None):
         """Log WebSocket messages with structured data"""
         log_msg = f"[{message_type}] WebSocket message"
@@ -289,3 +318,6 @@ if __name__ == "__main__":
     logger.call.info("Testing call logger")
     
     print(f"\n✅ Logs created in: {LOGS_DIR.absolute()}")
+
+class AuthError(Exception):
+    pass

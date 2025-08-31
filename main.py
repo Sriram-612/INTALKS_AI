@@ -8,6 +8,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Optional
 from urllib.parse import quote
 
 import httpx
@@ -16,14 +17,15 @@ import requests
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import (Body, FastAPI, File, HTTPException, Request, UploadFile,
-                     WebSocket)
+                     WebSocket, Depends, Query)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse)
+from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from requests.auth import HTTPBasicAuth
 from starlette.websockets import WebSocketDisconnect
+from starlette.middleware.sessions import SessionMiddleware
 
 # Load environment variables at the very beginning
 load_dotenv()
@@ -34,10 +36,13 @@ from database.schemas import (CallStatus, Customer,
 from services.call_management import call_service
 from utils import bedrock_client
 from utils.agent_transfer import trigger_exotel_agent_transfer
-from utils.logger import setup_application_logging, logger
+from utils.logger import setup_application_logging, logger, AuthError
 from utils.production_asr import ProductionSarvamHandler
 from utils.redis_session import (init_redis, redis_manager,
                                  generate_websocket_session_id)
+# Import authentication module
+from utils.cognito_hosted_auth import cognito_auth, get_current_user, get_current_user_optional
+from utils.session_middleware import RedisSessionMiddleware, get_session
 
 
 # --- Lifespan Management ---
@@ -46,28 +51,28 @@ async def lifespan(app: FastAPI):
     # Startup
     # Initialize logging system first
     setup_application_logging()
-    logger.app.info("🚀 Starting Voice Assistant Application...")
+    logger.info("🚀 Starting Voice Assistant Application...")
     
     # Initialize database
     if init_database():
-        logger.app.info("✅ Database initialized successfully")
+        logger.info("✅ Database initialized successfully")
         logger.database.info("Database connection established")
     else:
-        logger.error.error("❌ Database initialization failed")
+        logger.error("❌ Database initialization failed")
         logger.database.error("Failed to establish database connection")
     
     # Initialize Redis
     if init_redis():
-        logger.app.info("✅ Redis initialized successfully")
+        logger.info("✅ Redis initialized successfully")
     else:
-        logger.app.warning("❌ Redis initialization failed - running without session management")
+        logger.warning("❌ Redis initialization failed - running without session management")
     
-    logger.app.info("🎉 Application startup complete!")
+    logger.info("🎉 Application startup complete!")
     
     yield
     
     # Shutdown
-    logger.app.info("🛑 Shutting down Voice Assistant Application...")
+    logger.info("🛑 Shutting down Voice Assistant Application...")
 
 app = FastAPI(
     title="Voice Assistant Call Management System",
@@ -81,6 +86,19 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Add Redis-based Session middleware for Cognito authentication
+app.add_middleware(
+    RedisSessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET_KEY", "your-secret-key-change-in-production-123456789"),
+    max_age=3600 * 24 * 7,  # 7 days
+    session_cookie="session_id",
+    redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+    domain=None,        # Let the browser handle the domain automatically
+    secure=True,        # HTTPS required for ngrok
+    httponly=True,      # Prevent XSS
+    samesite="none"     # Cross-domain cookies for ngrok
 )
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
@@ -182,7 +200,7 @@ async def play_transfer_to_agent(websocket, customer_number: str):
     if customer_number and agent_number:
         await trigger_exotel_agent_transfer(customer_number, agent_number)
     else:
-        logger.error.error("Could not initiate agent transfer. Missing customer_number or agent_number.")
+        logger.error("Could not initiate agent transfer. Missing customer_number or agent_number.")
 
 CHUNK_SIZE = 1600
 async def stream_audio_to_websocket(websocket, audio_bytes):
@@ -219,12 +237,12 @@ async def stream_audio_to_websocket(websocket, audio_bytes):
 async def stream_audio_to_websocket_not_working(websocket, audio_bytes):
     CHUNK_SIZE = 8000  # Send 1 second of audio at a time
     if not audio_bytes:
-        logger.error.warning("No audio bytes to stream.")
+        logger.warning("No audio bytes to stream.")
         return
     
     # Check if WebSocket is still connected before streaming
     if websocket.client_state.name not in ['CONNECTED', 'CONNECTING']:
-        logger.error.warning(f"WebSocket not connected (state: {websocket.client_state.name}). Skipping audio stream.")
+        logger.warning(f"WebSocket not connected (state: {websocket.client_state.name}). Skipping audio stream.")
         return
     
     try:
@@ -233,7 +251,7 @@ async def stream_audio_to_websocket_not_working(websocket, audio_bytes):
         for i in range(0, len(audio_bytes), CHUNK_SIZE):
             # Check connection state before each chunk
             if websocket.client_state.name != 'CONNECTED':
-                logger.error.warning(f"WebSocket disconnected during streaming (state: {websocket.client_state.name}). Stopping audio stream.")
+                logger.warning(f"WebSocket disconnected during streaming (state: {websocket.client_state.name}). Stopping audio stream.")
                 break
                 
             chunk = audio_bytes[i:i + CHUNK_SIZE]
@@ -249,7 +267,7 @@ async def stream_audio_to_websocket_not_working(websocket, audio_bytes):
             
         logger.websocket.info("✅ Audio stream completed successfully")
     except Exception as e:
-        logger.error.error(f"Error streaming audio to WebSocket: {e}")
+        logger.error(f"Error streaming audio to WebSocket: {e}")
         raise
 
 async def greeting_template_play(websocket, customer_info, lang: str):
@@ -488,13 +506,469 @@ def get_initial_language_from_state(state: str) -> str:
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="static")
 
+# =============================================================================
+# AUTHENTICATION ROUTES
+# =============================================================================
+
+# Pydantic models for request/response
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+    first_name: str = None
+    last_name: str = None
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class ConfirmSignupRequest(BaseModel):
+    email: str
+    confirmation_code: str
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+@app.post("/auth/signup")
+async def signup(request: SignupRequest):
+    """
+    Register a new user with Amazon Cognito
+    
+    Body:
+        email: User's email address
+        password: User's password
+        first_name: Optional first name
+        last_name: Optional last name
+    
+    Returns:
+        JSON response with signup result
+    """
+    try:
+        # Prepare additional attributes
+        additional_attributes = {}
+        if request.first_name:
+            additional_attributes['given_name'] = request.first_name
+        if request.last_name:
+            additional_attributes['family_name'] = request.last_name
+        
+        result = await cognito_auth.signup(
+            email=request.email,
+            password=request.password,
+            additional_attributes=additional_attributes
+        )
+        
+        return JSONResponse(
+            status_code=201,
+            content=result
+        )
+        
+    except AuthError as e:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"success": False, "message": e.message}
+        )
+    except Exception as e:
+        logger.error(f"Signup error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Internal server error"}
+        )
+
+@app.post("/auth/confirm-signup")
+async def confirm_signup(request: ConfirmSignupRequest):
+    """
+    Confirm user signup with verification code
+    
+    Body:
+        email: User's email address
+        confirmation_code: 6-digit verification code
+    
+    Returns:
+        JSON response with confirmation result
+    """
+    try:
+        result = await cognito_auth.confirm_signup(
+            email=request.email,
+            confirmation_code=request.confirmation_code
+        )
+        
+        return JSONResponse(
+            status_code=200,
+            content=result
+        )
+        
+    except AuthError as e:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"success": False, "message": e.message}
+        )
+    except Exception as e:
+        logger.error(f"Confirm signup error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Internal server error"}
+        )
+
+@app.post("/auth/login")
+async def login(request: LoginRequest):
+    """
+    Authenticate user and return JWT tokens
+    
+    Body:
+        email: User's email address
+        password: User's password
+    
+    Returns:
+        JSON response with access token, refresh token, and user info
+    """
+    try:
+        result = await cognito_auth.login(
+            email=request.email,
+            password=request.password
+        )
+        
+        # Log successful login
+        logger.info(f"User {request.email} logged in successfully")
+        
+        return JSONResponse(
+            status_code=200,
+            content=result
+        )
+        
+    except AuthError as e:
+        logger.warning(f"Login failed for {request.email}: {e.message}")
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"success": False, "message": e.message}
+        )
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Internal server error"}
+        )
+
+@app.post("/auth/refresh")
+async def refresh_token(request: RefreshTokenRequest):
+    """
+    Refresh access token using refresh token
+    
+    Body:
+        refresh_token: Valid refresh token
+    
+    Returns:
+        JSON response with new access token
+    """
+    try:
+        result = await cognito_auth.refresh_token(request.refresh_token)
+        
+        return JSONResponse(
+            status_code=200,
+            content=result
+        )
+        
+    except AuthError as e:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"success": False, "message": e.message}
+        )
+    except Exception as e:
+        logger.error(f"Token refresh error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Internal server error"}
+        )
+
+@app.get("/auth/logout")
+async def logout(request: Request):
+    """
+    Logout user using Cognito hosted UI logout
+    Clears session and redirects to Cognito logout URL
+    """
+    try:
+        # Clear the user session
+        session = get_session(request)
+        session.clear()
+        
+        # Redirect to Cognito hosted UI logout
+        logout_url = cognito_auth.get_logout_url()
+        return RedirectResponse(url=logout_url, status_code=302)
+        
+    except Exception as e:
+        logger.error(f"Logout error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Internal server error"}
+        )
+
+@app.get("/auth/me")
+async def get_current_user_info(request: Request):
+    """
+    Get current authenticated user information
+    
+    Returns:
+        JSON response with user information or 401 if not authenticated
+    """
+    try:
+        user = cognito_auth.get_user_from_session(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+            
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "user": {
+                    "sub": user.get("sub"),
+                    "email": user.get("email"),
+                    "username": user.get("username")
+                }
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get user error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Internal server error"}
+        )
+
+@app.get("/auth/callback")
+async def auth_callback(
+    request: Request,
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    error_description: Optional[str] = Query(None)
+):
+    """
+    Handle OAuth callback from Cognito hosted UI
+    
+    Query Parameters:
+        code: Authorization code from Cognito (on success)
+        state: State parameter for security validation
+        error: Error code (on failure)
+        error_description: Human-readable error description
+    
+    Returns:
+        Redirect response to dashboard on success, error page on failure
+    """
+    try:
+        # Handle error cases first
+        if error:
+            logger.error(f"OAuth callback error: {error} - {error_description}")
+            return HTMLResponse(
+                content=f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Authentication Error</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
+                        .error {{ color: #d32f2f; background: #ffebee; padding: 20px; border-radius: 8px; margin: 20px auto; max-width: 500px; }}
+                        .btn {{ background: #1976d2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin-top: 20px; }}
+                    </style>
+                </head>
+                <body>
+                    <h1>Authentication Failed</h1>
+                    <div class="error">
+                        <strong>Error:</strong> {error}<br>
+                        <strong>Description:</strong> {error_description or 'Authentication failed'}
+                    </div>
+                    <a href="/" class="btn">Try Again</a>
+                </body>
+                </html>
+                """,
+                status_code=400
+            )
+        
+        # Handle successful callback
+        if code:
+            logger.info(f"Callback received code: {code[:20]}...")
+            
+            # Exchange code for tokens
+            tokens = await cognito_auth.exchange_code_for_tokens(code)
+            logger.info(f"Tokens received: {list(tokens.keys())}")
+            
+            # Verify ID token and get user info (ID tokens have the 'aud' claim)
+            id_token = tokens.get("id_token")
+            if not id_token:
+                raise HTTPException(status_code=400, detail="ID token not received from Cognito")
+            
+            user_info = await cognito_auth.verify_token(id_token)
+            logger.info(f"User info verified: {user_info.get('email')}")
+            
+            # Get Redis session
+            session = get_session(request)
+            
+            # Log session before saving
+            logger.info(f"Session before saving: {dict(session.data)}")
+            
+            # Store user in session
+            user_session_data = {
+                "sub": user_info["sub"],
+                "email": user_info.get("email"),
+                "username": user_info.get("username"),
+                "access_token": tokens["access_token"],
+                "id_token": tokens.get("id_token"),
+                "refresh_token": tokens.get("refresh_token")
+            }
+            session["user"] = user_session_data
+            
+            # Log session after saving
+            logger.info(f"Session after saving: {dict(session.data)}")
+            logger.info(f"User data saved to session: {user_session_data['email']}")
+            
+            logger.info(f"User {user_info.get('email')} authenticated successfully")
+            
+            # Add a small delay to ensure session is saved
+            import asyncio
+            await asyncio.sleep(0.1)
+            
+            # Redirect to dashboard
+            return RedirectResponse(url="/static/index.html", status_code=302)
+        
+        # No code or error provided
+        return HTMLResponse(
+            content="""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Invalid Callback</title>
+                <style>
+                    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                    .error { color: #d32f2f; background: #ffebee; padding: 20px; border-radius: 8px; margin: 20px auto; max-width: 500px; }
+                    .btn { background: #1976d2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin-top: 20px; }
+                </style>
+            </head>
+            <body>
+                <h1>Invalid Authentication Request</h1>
+                <div class="error">
+                    <p>The authentication callback is missing required parameters.</p>
+                </div>
+                <a href="/" class="btn">Start Authentication</a>
+            </body>
+            </html>
+            """,
+            status_code=400
+        )
+        
+    except Exception as e:
+        logger.error(f"Callback processing error: {str(e)}")
+        return HTMLResponse(
+            content=f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Authentication Error</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
+                    .error {{ color: #d32f2f; background: #ffebee; padding: 20px; border-radius: 8px; margin: 20px auto; max-width: 500px; }}
+                    .btn {{ background: #1976d2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin-top: 20px; }}
+                </style>
+            </head>
+            <body>
+                <h1>Authentication Error</h1>
+                <div class="error">
+                    <p>Error processing authentication: {str(e)}</p>
+                </div>
+                <a href="/" class="btn">Try Again</a>
+            </body>
+            </html>
+            """,
+            status_code=500
+        )
+
+@app.get("/auth/login-url")
+async def get_login_url(redirect_uri: str = "http://localhost:8000/auth/callback", state: Optional[str] = None):
+    """
+    Generate Cognito hosted UI login URL
+    
+    Query Parameters:
+        redirect_uri: Where to redirect after authentication (default: /auth/callback)
+        state: Optional state parameter for security
+    
+    Returns:
+        JSON response with the Cognito hosted UI URL
+    """
+    try:
+        auth_url = cognito_auth.generate_auth_url(redirect_uri, state)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "auth_url": auth_url,
+                "redirect_uri": redirect_uri,
+                "state": state
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Auth URL generation error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Internal server error"}
+        )
+
+@app.get("/auth/login")
+async def auth_login_redirect(request: Request, state: str = "default"):
+    """
+    Redirect to Cognito hosted UI login
+    """
+    login_url = cognito_auth.get_login_url(state)
+    return RedirectResponse(url=login_url)
+
+# =============================================================================
+# END AUTHENTICATION ROUTES
+# =============================================================================
+
 # --- HTML Endpoints ---
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
     """
-    Serves the improved dashboard HTML file at the root URL.
+    Serves the dashboard with Cognito hosted UI authentication.
+    Redirects to Cognito login if not authenticated.
     """
-    return templates.TemplateResponse("index.html", {"request": request})
+    # Get Redis session
+    session = get_session(request)
+    
+    # Debug logging
+    session_data = dict(session.data)
+    user_data = session.get("user")
+    is_auth = user_data is not None
+    
+    logger.info(f"Dashboard access attempt - Session data: {session_data}")
+    logger.info(f"Dashboard access attempt - User data: {user_data}")
+    logger.info(f"Dashboard access attempt - Is authenticated: {is_auth}")
+    
+    # Check if user is authenticated
+    if not is_auth:
+        logger.info("User not authenticated, redirecting to Cognito login")
+        # Redirect to Cognito hosted UI login
+        login_url = cognito_auth.get_login_url()
+        return RedirectResponse(url=login_url, status_code=302)
+    
+    logger.info("User authenticated, serving dashboard")
+    # User is authenticated, redirect to the static dashboard
+    return RedirectResponse(url="/static/index.html", status_code=302)
+
+@app.get("/debug/session")
+async def debug_session(request: Request):
+    """Debug endpoint to check session state"""
+    session = get_session(request)
+    session_data = dict(session.data)
+    user_data = session.get("user")
+    is_auth = user_data is not None
+    
+    return {
+        "session_exists": bool(session),
+        "session_data": session_data,
+        "user_data": user_data,
+        "is_authenticated": is_auth,
+        "session_keys": list(session.data.keys()) if session else []
+    }
 
 @app.get("/original", response_class=HTMLResponse)
 async def get_original_dashboard(request: Request):
@@ -531,7 +1005,7 @@ async def generate_websocket_url(request: Request):
                     temp_call_id = pair.split('=', 1)[1]
                     break
         except Exception as e:
-            logger.error.error(f"🔗 Failed to parse temp_call_id from CustomField: {e}")
+            logger.error(f"🔗 Failed to parse temp_call_id from CustomField: {e}")
     
     # Use CallSid as session_id if available, otherwise use temp_call_id
     session_id = call_sid or temp_call_id or generate_websocket_session_id()
@@ -576,7 +1050,7 @@ async def handle_passthru(request: Request):
     custom_field = params.get("CustomField")
 
     if not call_sid:
-        logger.error.error("❌ Passthru handler called without a CallSid.")
+        logger.error("❌ Passthru handler called without a CallSid.")
         # Still return OK to Exotel to not break their flow, but log the error.
         return "OK"
 
@@ -594,7 +1068,7 @@ async def handle_passthru(request: Request):
                     customer_data[key.strip()] = value.strip()
             logger.websocket.info(f"📊 Passthru: Parsed Custom Fields: {customer_data}")
         except Exception as e:
-            logger.error.error(f"❌ Passthru: Failed to parse CustomField: {e}")
+            logger.error(f"❌ Passthru: Failed to parse CustomField: {e}")
             # Log error but continue, as we might have the CallSid
     
     # Get the temporary ID to link sessions
@@ -626,7 +1100,7 @@ async def handle_passthru(request: Request):
         finally:
             session.close()
     except Exception as e:
-        logger.error.error(f"❌ Passthru: Database update failed for CallSid {call_sid}: {e}")
+        logger.error(f"❌ Passthru: Database update failed for CallSid {call_sid}: {e}")
 
     # IMPORTANT: Always return "OK" for Exotel to proceed with the call flow.
     logger.websocket.info("✅ Passthru: Responding 'OK' to Exotel.")
@@ -1051,7 +1525,7 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                     last_transcription_time = now
 
     except Exception as e:
-        logger.error.error(f"WebSocket compatibility error: {e}")
+        logger.error(f"WebSocket compatibility error: {e}")
         logger.log_call_event("WEBSOCKET_COMPATIBILITY_ERROR", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown', {"error": str(e)})
     finally:
         # Ensure the websocket is closed gracefully only after conversation is complete
@@ -1066,7 +1540,7 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
             else:
                 logger.websocket.info("🔒 WebSocket already disconnected")
         except Exception as close_error:
-            logger.error.error(f"Error closing WebSocket: {close_error}")
+            logger.error(f"Error closing WebSocket: {close_error}")
         logger.log_call_event("WEBSOCKET_CLOSED_GRACEFUL", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown')
 
 
@@ -1109,11 +1583,12 @@ class CustomerData(BaseModel):
     language_code: str
 
 @app.post("/api/upload-customers")
-async def upload_customers(file: UploadFile = File(...)):
+async def upload_customers(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     """
     Accepts a CSV or Excel file, processes it, and stores customer data in the database.
+    Requires authentication.
     """
-    print(f"📁 [CHECKPOINT] /api/upload-customers endpoint hit")
+    print(f"📁 [CHECKPOINT] /api/upload-customers endpoint hit by user: {current_user.get('email', 'unknown')}")
     print(f"📁 [CHECKPOINT] File name: {file.filename}")
     print(f"📁 [CHECKPOINT] File content type: {file.content_type}")
     
@@ -1123,55 +1598,76 @@ async def upload_customers(file: UploadFile = File(...)):
         
         result = await call_service.upload_and_process_customers(file_data, file.filename)
         print(f"📁 [CHECKPOINT] File processing result: {result}")
+        
+        # Log the action with user information
+        logger.info(f"User {current_user.get('email')} uploaded customer file: {file.filename}")
+        
         return result
     except Exception as e:
         print(f"❌ [CHECKPOINT] Exception in upload_customers endpoint: {e}")
+        logger.error(f"Upload customers error for user {current_user.get('email')}: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @app.post("/api/trigger-single-call")
-async def trigger_single_call(customer_id: str = Body(..., embed=True)):
+async def trigger_single_call(customer_id: str = Body(..., embed=True), current_user: dict = Depends(get_current_user)):
     """
     Triggers a single call to a customer by their ID.
+    Requires authentication.
     """
-    print(f"🚀 [CHECKPOINT] /api/trigger-single-call endpoint hit")
+    print(f"🚀 [CHECKPOINT] /api/trigger-single-call endpoint hit by user: {current_user.get('email', 'unknown')}")
     print(f"🚀 [CHECKPOINT] Customer ID: {customer_id}")
     
     try:
         result = await call_service.trigger_single_call(customer_id)
         print(f"🚀 [CHECKPOINT] Call service result: {result}")
+        
+        # Log the action with user information
+        logger.info(f"User {current_user.get('email')} triggered single call for customer: {customer_id}")
+        
         return result
     except Exception as e:
         print(f"❌ [CHECKPOINT] Exception in trigger_single_call endpoint: {e}")
+        logger.error(f"Trigger single call error for user {current_user.get('email')}: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @app.post("/api/trigger-bulk-calls")
-async def trigger_bulk_calls(customer_ids: list[str] = Body(..., embed=True)):
+async def trigger_bulk_calls(customer_ids: list[str] = Body(..., embed=True), current_user: dict = Depends(get_current_user)):
     """
     Triggers calls to a list of customers by their IDs.
+    Requires authentication.
     """
-    print(f"🚀 [CHECKPOINT] /api/trigger-bulk-calls endpoint hit")
+    print(f"🚀 [CHECKPOINT] /api/trigger-bulk-calls endpoint hit by user: {current_user.get('email', 'unknown')}")
     print(f"🚀 [CHECKPOINT] Customer IDs: {customer_ids}")
     print(f"🚀 [CHECKPOINT] Number of customers: {len(customer_ids)}")
     
     try:
         result = await call_service.trigger_bulk_calls(customer_ids)
         print(f"🚀 [CHECKPOINT] Bulk call service result: {result}")
+        
+        # Log the action with user information
+        logger.info(f"User {current_user.get('email')} triggered bulk calls for {len(customer_ids)} customers")
+        
         return result
     except Exception as e:
         print(f"❌ [CHECKPOINT] Exception in trigger_bulk_calls endpoint: {e}")
+        logger.error(f"Trigger bulk calls error for user {current_user.get('email')}: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @app.get("/api/customers")
-async def get_all_customers():
+async def get_all_customers(current_user: dict = Depends(get_current_user)):
     """
     Retrieves all customers from the database.
+    Requires authentication.
     """
-    print(f"👥 [CHECKPOINT] /api/customers endpoint hit")
+    print(f"👥 [CHECKPOINT] /api/customers endpoint hit by user: {current_user.get('email', 'unknown')}")
     
     session = db_manager.get_session()
     try:
         customers = session.query(Customer).all()
         print(f"👥 [CHECKPOINT] Found {len(customers)} customers in database")
+        
+        # Log the action with user information
+        logger.info(f"User {current_user.get('email')} accessed customer list ({len(customers)} customers)")
         
         result = [
             {
@@ -1662,7 +2158,7 @@ async def old_websocket_endpoint(websocket: WebSocket):
                     last_transcription_time = now
 
     except Exception as e:
-        logger.error.error(f"WebSocket compatibility error: {e}")
+        logger.error(f"WebSocket compatibility error: {e}")
         logger.log_call_event("WEBSOCKET_COMPATIBILITY_ERROR", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown', {"error": str(e)})
     finally:
         # Ensure the websocket is closed gracefully only after conversation is complete
@@ -1677,12 +2173,12 @@ async def old_websocket_endpoint(websocket: WebSocket):
             else:
                 logger.websocket.info("🔒 WebSocket already disconnected")
         except Exception as close_error:
-            logger.error.error(f"Error closing WebSocket: {close_error}")
+            logger.error(f"Error closing WebSocket: {close_error}")
         logger.log_call_event("WEBSOCKET_CLOSED_GRACEFUL", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown')
 
 
 if __name__ == "__main__":
-    logger.app.info("Starting server directly from main.py")
+    logger.info("Starting server directly from main.py")
     import uvicorn
     uvicorn.run(
         "main:app",

@@ -69,7 +69,8 @@ async def analyze_specific_call(call_sid):
 
 async def get_recent_calls_analysis():
     """Analyze recent calls to your test number"""
-    print("🔍 Analyzing Recent Calls to +917417119014")
+    agent_phone_number = os.getenv("AGENT_PHONE_NUMBER", "+917417119014")
+    print(f"🔍 Analyzing Recent Calls to {agent_phone_number}")
     print("=" * 50)
     
     exotel_sid = os.getenv("EXOTEL_SID")
@@ -86,10 +87,10 @@ async def get_recent_calls_analysis():
             calls_data = response.json()
             calls = calls_data.get('Calls', [])
             
-            # Filter calls to the test number
-            test_calls = [call for call in calls if call.get('To') == '+917417119014']
+            # Filter calls to the agent number
+            test_calls = [call for call in calls if call.get('To') == agent_phone_number]
             
-            print(f"Found {len(test_calls)} calls to +917417119014")
+            print(f"Found {len(test_calls)} calls to {agent_phone_number}")
             
             for i, call in enumerate(test_calls[:5], 1):
                 print(f"\n📞 Call #{i}:")

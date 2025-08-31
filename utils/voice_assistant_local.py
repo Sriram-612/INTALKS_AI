@@ -17,6 +17,13 @@ API_KEY = os.getenv("SARVAM_API_KEY")
 if not API_KEY:
     raise ValueError("SARVAM_API_KEY not found in environment.")
 
+# Exotel configuration
+EXOTEL_SID = os.getenv("EXOTEL_SID")
+EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
+EXOTEL_API_TOKEN = os.getenv("EXOTEL_TOKEN")
+EXOPHONE = os.getenv("EXOTEL_VIRTUAL_NUMBER")
+EXOTEL_APP_ID = os.getenv("EXOTEL_FLOW_APP_ID")
+
 client = SarvamAI(api_subscription_key=API_KEY)
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -151,7 +158,7 @@ EXOTEL_APP_ID = os.getenv("EXOTEL_APP_ID")
 app = FastAPI()
 
 def trigger_exotel_call(to_number: str):
-    url = f"https://{EXOTEL_API_Key}:{EXOTEL_API_TOKEN}@api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
+    url = f"https://{EXOTEL_API_KEY}:{EXOTEL_API_TOKEN}@api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
     # https://<your_api_key>:<your_api_token><subdomain>/v1/Accounts/<your_sid>/Calls/connect
 
     payload = {

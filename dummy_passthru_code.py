@@ -1,3 +1,21 @@
+import os
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
+from requests.auth import HTTPBasicAuth
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Environment variables
+EXOTEL_SID = os.getenv("EXOTEL_SID")
+EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
+EXOTEL_API_TOKEN = os.getenv("EXOTEL_TOKEN")
+EXOTEL_VIRTUAL_NUMBER = os.getenv("EXOTEL_VIRTUAL_NUMBER")
+EXOTEL_FLOW_APP_ID = os.getenv("EXOTEL_FLOW_APP_ID")
+
+app = FastAPI()
+
 @app.get("/passthru-handler")
 async def handle_passthru(request: Request):
     print("[INFO] /passthru-handler hit")
