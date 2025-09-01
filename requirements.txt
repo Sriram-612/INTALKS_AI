@@ -28,15 +28,6 @@ requests>=2.31.0
 
 # Data Processing & File Handling
 pandas>=2.0.0
-
-# Authentication & JWT
-PyJWT>=2.8.0
-cryptography>=41.0.0
-
-# System Monitoring
-psutil>=5.9.0
-
-# =============================================================================
 openpyxl>=3.1.0
 xlsxwriter>=3.1.0
 
@@ -51,6 +42,7 @@ SpeechRecognition>=3.10.0
 # AI/ML Services
 sarvamai>=0.1.0
 boto3>=1.29.0
+botocore>=1.32.0
 
 # Authentication & Security
 PyJWT>=2.8.0
@@ -59,8 +51,14 @@ cryptography>=41.0.0
 # Environment & Configuration
 python-dotenv>=1.0.0
 
-# Background Tasks (Optional)
+# WebSocket Support
+websockets>=11.0.0
+
+# Background Tasks & Task Management
 celery[redis]>=5.3.0
+
+# System Monitoring & Utilities
+psutil>=5.9.0
 
 # Production Deployment
 gunicorn>=21.2.0
@@ -69,17 +67,37 @@ gunicorn>=21.2.0
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 
-# Additional Utilities
-websockets>=11.0.0
-pathlib
+# AWS SDK Extensions
+aiobotocore>=2.7.0
+
+# Additional Core Python Libraries (if needed in virtual environments)
+# These are usually included with Python but listed for completeness
+python-dateutil>=2.8.0
 
 # =============================================================================
-# PACKAGE NOTES:
-# - All core FastAPI and web framework dependencies
-# - Database integration with PostgreSQL and SQLAlchemy 2.0+
+# DEPLOYMENT NOTES:
+# 
+# CORE FEATURES:
+# - FastAPI web framework with async WebSocket support
+# - PostgreSQL database with SQLAlchemy 2.0+ ORM
 # - Redis for session management and caching
-# - Audio processing for voice features
-# - AI/ML integration with Sarvam AI and AWS Bedrock
-# - Production-ready with gunicorn
-# - Testing framework included
+# - AWS Cognito authentication with JWT tokens
+# - Real-time voice processing with Sarvam AI
+# - Audio streaming and processing capabilities
+# 
+# PRODUCTION REQUIREMENTS:
+# - All packages are production-tested
+# - Versions specified for stability
+# - Includes monitoring and logging utilities
+# - Redis session management for scalability
+# - AWS services integration (Cognito, Bedrock)
+# 
+# INSTALLATION:
+# pip install -r requirements.txt
+# 
+# OPTIONAL AUDIO DEPENDENCIES:
+# For full audio functionality, you may also need system-level packages:
+# - Ubuntu/Debian: apt-get install portaudio19-dev python3-pyaudio
+# - CentOS/RHEL: yum install portaudio-devel
+# - macOS: brew install portaudio
 # ============================================================================= 
