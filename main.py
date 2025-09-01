@@ -196,11 +196,11 @@ async def play_transfer_to_agent(websocket, customer_number: str):
 
     logger.websocket.info("📞 Initiating agent call transfer")
     # The AGENT_NUMBER should be loaded from environment variables
-    agent_number = os.getenv("AGENT_PHONE_NUMBER")
-    if customer_number and agent_number:
-        await trigger_exotel_agent_transfer(customer_number, agent_number)
-    else:
-        logger.error("Could not initiate agent transfer. Missing customer_number or agent_number.")
+    # agent_number = os.getenv("AGENT_PHONE_NUMBER")
+    # if customer_number and agent_number:
+    #     await trigger_exotel_agent_transfer(customer_number, agent_number)
+    # else:
+    #     logger.error("Could not initiate agent transfer. Missing customer_number or agent_number.")
 
 CHUNK_SIZE = 1600
 async def stream_audio_to_websocket(websocket, audio_bytes):
@@ -1348,24 +1348,24 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                             await play_did_not_hear_response(websocket, call_detected_lang)
                             # Reset the timer to wait for user response
                             last_transcription_time = time.time()
-                        elif conversation_stage == "WAITING_AGENT_RESPONSE":
-                            agent_question_repeat_count += 1
-                            if agent_question_repeat_count <= 2:  # Limit to 2 repeats
-                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
-                                logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
-                                await play_agent_connect_question(websocket, call_detected_lang)
-                                # Reset the timer to wait for user response
-                                last_transcription_time = time.time()
-                            else:
-                                logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
-                                logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
-                                customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                conversation_stage = "TRANSFERRING_TO_AGENT"
-                                interaction_complete = True
-                                # Wait for transfer message to be sent before ending loop
-                                await asyncio.sleep(2)
-                                break
+                        # elif conversation_stage == "WAITING_AGENT_RESPONSE":
+                        #     agent_question_repeat_count += 1
+                        #     if agent_question_repeat_count <= 2:  # Limit to 2 repeats
+                        #         logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
+                        #         logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                        #         await play_agent_connect_question(websocket, call_detected_lang)
+                        #         # Reset the timer to wait for user response
+                        #         last_transcription_time = time.time()
+                        #     else:
+                        #         logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
+                        #         logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
+                        #         customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                        #         await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                        #         conversation_stage = "TRANSFERRING_TO_AGENT"
+                        #         interaction_complete = True
+                                # # Wait for transfer message to be sent before ending loop
+                                # await asyncio.sleep(2)
+                                # break
                         audio_buffer.clear()
                         last_transcription_time = now
                         continue
@@ -1478,7 +1478,7 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                         logger.websocket.info("User affirmed agent transfer. Initiating transfer.")
                                         logger.log_call_event("AGENT_TRANSFER_INITIATED", call_sid, customer_info['name'], {"intent": intent})
                                         customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                        # await play_transfer_to_agent(websocket, customer_number=customer_number) 
                                         conversation_stage = "TRANSFERRING_TO_AGENT"
                                         interaction_complete = True
                                         # Wait for a moment before closing to ensure transfer message is sent
@@ -1499,22 +1499,22 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                     else:
                                         logger.websocket.warning("⚠️ Goodbye already sent, ignoring duplicate request")
                                 else:
-                                    agent_question_repeat_count += 1
-                                    if agent_question_repeat_count <= 2:  # Limit to 2 repeats
-                                        logger.websocket.info(f"Unclear response to agent connect. Repeating question (attempt {agent_question_repeat_count}/2).")
-                                        logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
-                                        await play_agent_connect_question(websocket, call_detected_lang)
-                                        # Reset the timer to wait for user response
-                                        last_transcription_time = time.time()
-                                    else:
-                                        logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
-                                        logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
-                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                        conversation_stage = "TRANSFERRING_TO_AGENT"
-                                        interaction_complete = True
-                                        # Wait for transfer message to be sent before closing
-                                        await asyncio.sleep(2)
+                                    # # agent_question_repeat_count += 1
+                                    # if agent_question_repeat_count <= 2:  # Limit to 2 repeats
+                                    #     logger.websocket.info(f"Unclear response to agent connect. Repeating question (attempt {agent_question_repeat_count}/2).")
+                                    #     logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                                    #     await play_agent_connect_question(websocket, call_detected_lang)
+                                    #     # Reset the timer to wait for user response
+                                    #     last_transcription_time = time.time()
+                                    # else:
+                                    #     logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
+                                    #     logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
+                                    #     customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                    #     # await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                    #     conversation_stage = "TRANSFERRING_TO_AGENT"
+                                    #     interaction_complete = True
+                                    #     # Wait for transfer message to be sent before closing
+                                    #     await asyncio.sleep(2)
                                         break
                             # Add more elif conditions here for additional conversation stages if your flow extends
                     except Exception as e:
@@ -1998,19 +1998,19 @@ async def old_websocket_endpoint(websocket: WebSocket):
                             await play_did_not_hear_response(websocket, call_detected_lang)
                             last_transcription_time = time.time()
                         elif conversation_stage == "WAITING_AGENT_RESPONSE":
-                            agent_question_repeat_count += 1
-                            if agent_question_repeat_count <= 2:
-                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
-                                logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
-                                await play_agent_connect_question(websocket, call_detected_lang)
-                                last_transcription_time = time.time()
-                            else:
-                                logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
-                                logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
-                                customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                conversation_stage = "TRANSFERRING_TO_AGENT"
-                                interaction_complete = True
+                            # agent_question_repeat_count += 1
+                            # if agent_question_repeat_count <= 2:
+                            #     logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
+                            #     logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                            #     await play_agent_connect_question(websocket, call_detected_lang)
+                            #     last_transcription_time = time.time()
+                            # else:
+                            #     logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
+                            #     logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
+                            #     customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                            #     # await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                            #     conversation_stage = "TRANSFERRING_TO_AGENT"
+                            #     interaction_complete = True
                                 await asyncio.sleep(2)
                                 break
                         audio_buffer.clear()
@@ -2103,7 +2103,7 @@ async def old_websocket_endpoint(websocket: WebSocket):
                             elif conversation_stage == "WAITING_AGENT_RESPONSE":
                                 try:
                                     intent = detect_intent_with_claude(transcript, call_detected_lang)
-                                    logger.websocket.info(f"Claude detected intent: {intent}")
+                                    logger.websocket.info(f"Claude detected : {intent}")
                                     logger.log_call_event("INTENT_DETECTED_CLAUDE", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript})
                                 except Exception as e:
                                     logger.websocket.error(f"❌ Error in Claude intent detection: {e}")
@@ -2116,7 +2116,7 @@ async def old_websocket_endpoint(websocket: WebSocket):
                                         logger.websocket.info("User affirmed agent transfer. Initiating transfer.")
                                         logger.log_call_event("AGENT_TRANSFER_INITIATED", call_sid, customer_info['name'], {"intent": intent})
                                         customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                        # await play_transfer_to_agent(websocket, customer_number=customer_number) 
                                         conversation_stage = "TRANSFERRING_TO_AGENT"
                                         interaction_complete = True
                                         await asyncio.sleep(2)
@@ -2135,20 +2135,20 @@ async def old_websocket_endpoint(websocket: WebSocket):
                                     else:
                                         logger.websocket.warning("⚠️ Goodbye already sent, ignoring duplicate request")
                                 else:
-                                    agent_question_repeat_count += 1
-                                    if agent_question_repeat_count <= 2:
-                                        logger.websocket.info(f"Unclear response to agent connect. Repeating question (attempt {agent_question_repeat_count}/2).")
-                                        logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
-                                        await play_agent_connect_question(websocket, call_detected_lang)
-                                        last_transcription_time = time.time()
-                                    else:
-                                        logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
-                                        logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
-                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                        conversation_stage = "TRANSFERRING_TO_AGENT"
-                                        interaction_complete = True
-                                        await asyncio.sleep(2)
+                                    # agent_question_repeat_count += 1
+                                    # if agent_question_repeat_count <= 2:
+                                    #     logger.websocket.info(f"Unclear response to agent connect. Repeating question (attempt {agent_question_repeat_count}/2).")
+                                    #     logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                                    #     await play_agent_connect_question(websocket, call_detected_lang)
+                                    #     last_transcription_time = time.time()
+                                    # else:
+                                    #     logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
+                                    #     logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
+                                    #     customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                    #     # await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                    #     conversation_stage = "TRANSFERRING_TO_AGENT"
+                                    #     interaction_complete = True
+                                    #     await asyncio.sleep(2)
                                         break
                     except Exception as e:
                         logger.websocket.error(f"❌ Error processing transcript: {e}")
