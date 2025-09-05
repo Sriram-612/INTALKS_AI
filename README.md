@@ -61,7 +61,7 @@ AGENT_PHONE_NUMBER="your_agent_phone_number"
 SARVAM_API_KEY="your_sarvam_api_key"
 
 # Database Configuration
-DATABASE_URL="postgresql://username:password@localhost:5432/voice_assistant_db"
+DATABASE_URL="postgresql://postgres:IntalksAI07@db-voice-agent.cviea4aicss0.ap-south-1.rds.amazonaws.com:5432/db-voice-agent"
 
 # Redis Configuration
 REDIS_HOST="localhost"
