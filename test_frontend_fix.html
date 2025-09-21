@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Frontend Fix Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .customer { border: 1px solid #ccc; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .error { color: red; }
+        .success { color: green; }
+    </style>
+</head>
+<body>
+    <h1>Frontend Data Handling Test</h1>
+    <div id="status">Loading...</div>
+    <div id="customers"></div>
+
+    <script>
+        async function testFrontend() {
+            const statusDiv = document.getElementById('status');
+            const customersDiv = document.getElementById('customers');
+
+            try {
+                statusDiv.innerHTML = '<span class="success">Loading customer data...</span>';
+                
+                const response = await fetch('/api/customers');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const customers = await response.json();
+                statusDiv.innerHTML = `<span class="success">✅ Successfully loaded ${customers.length} customers</span>`;
+                
+                customersDiv.innerHTML = customers.map(customer => `
+                    <div class="customer">
+                        <h3>Customer #${customer.id.slice(0, 8)}...</h3>
+                        <p><strong>Name:</strong> ${customer.name || 'N/A'}</p>
+                        <p><strong>Phone:</strong> ${customer.phone_number || 'N/A'}</p>
+                        <p><strong>State:</strong> ${customer.state || 'N/A'}</p>
+                        <p><strong>Language:</strong> ${customer.language_code || 'N/A'}</p>
+                        <p><strong>Loans:</strong> ${customer.loans?.length || 0} loan(s)</p>
+                        <p><strong>Created:</strong> ${new Date(customer.created_at).toLocaleString()}</p>
+                    </div>
+                `).join('');
+                
+            } catch (error) {
+                statusDiv.innerHTML = `<span class="error">❌ Error: ${error.message}</span>`;
+                console.error('Frontend test error:', error);
+            }
+        }
+
+        // Test on page load
+        testFrontend();
+    </script>
+</body>
+</html>

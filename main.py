@@ -196,11 +196,11 @@ async def play_transfer_to_agent(websocket, customer_number: str):
 
     logger.websocket.info("📞 Initiating agent call transfer")
     # The AGENT_NUMBER should be loaded from environment variables
-    # agent_number = os.getenv("AGENT_PHONE_NUMBER")
-    # if customer_number and agent_number:
-    #     await trigger_exotel_agent_transfer(customer_number, agent_number)
-    # else:
-    #     logger.error("Could not initiate agent transfer. Missing customer_number or agent_number.")
+    agent_number = os.getenv("AGENT_PHONE_NUMBER")
+    if customer_number and agent_number:
+        await trigger_exotel_agent_transfer(customer_number, agent_number)
+    else:
+        logger.error("Could not initiate agent transfer. Missing customer_number or agent_number.")
 
 CHUNK_SIZE = 1600
 async def stream_audio_to_websocket(websocket, audio_bytes):
@@ -1279,7 +1279,7 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                     }))
                     return
                 
-                # 5. Validate customer data has required fields
+                # 5. Validate customer data has required fields (allow placeholder values)
                 required_fields = ['name', 'loan_id', 'amount', 'due_date']
                 missing_fields = [field for field in required_fields if not customer_info.get(field)]
                 if missing_fields:
@@ -1289,6 +1289,14 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                         "message": f"Customer data incomplete. Missing fields: {', '.join(missing_fields)}"
                     }))
                     return
+                
+                # Convert placeholder values to generic terms for speech
+                if customer_info.get('loan_id') in ['Unknown', 'N/A', None]:
+                    customer_info['loan_id'] = '1234'  # Generic loan ID for speech
+                if customer_info.get('amount') in ['Unknown', 'N/A', '₹0', None]:
+                    customer_info['amount'] = '5000'  # Generic amount for speech
+                if customer_info.get('due_date') in ['Unknown', 'N/A', None]:
+                    customer_info['due_date'] = 'this month'  # Generic due date for speech
                 
                 print(f"[WebSocket] ✅ Customer data validated: {customer_info['name']} - Loan: {customer_info['loan_id']}, Amount: ₹{customer_info['amount']}")
                 
@@ -1348,24 +1356,24 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                             await play_did_not_hear_response(websocket, call_detected_lang)
                             # Reset the timer to wait for user response
                             last_transcription_time = time.time()
-                        # elif conversation_stage == "WAITING_AGENT_RESPONSE":
-                        #     agent_question_repeat_count += 1
-                        #     if agent_question_repeat_count <= 2:  # Limit to 2 repeats
-                        #         logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
-                        #         logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
-                        #         await play_agent_connect_question(websocket, call_detected_lang)
-                        #         # Reset the timer to wait for user response
-                        #         last_transcription_time = time.time()
-                        #     else:
-                        #         logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
-                        #         logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
-                        #         customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                        #         await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                        #         conversation_stage = "TRANSFERRING_TO_AGENT"
-                        #         interaction_complete = True
-                                # # Wait for transfer message to be sent before ending loop
-                                # await asyncio.sleep(2)
-                                # break
+                        elif conversation_stage == "WAITING_AGENT_RESPONSE":
+                            agent_question_repeat_count += 1
+                            if agent_question_repeat_count <= 2:  # Limit to 2 repeats
+                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
+                                logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                                await play_agent_connect_question(websocket, call_detected_lang)
+                                # Reset the timer to wait for user response
+                                last_transcription_time = time.time()
+                            else:
+                                logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
+                                logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
+                                customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                conversation_stage = "TRANSFERRING_TO_AGENT"
+                                interaction_complete = True
+                                # Wait for transfer message to be sent before ending loop
+                                await asyncio.sleep(2)
+                                break
                         audio_buffer.clear()
                         last_transcription_time = now
                         continue
@@ -1478,7 +1486,7 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                         logger.websocket.info("User affirmed agent transfer. Initiating transfer.")
                                         logger.log_call_event("AGENT_TRANSFER_INITIATED", call_sid, customer_info['name'], {"intent": intent})
                                         customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                        # await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
                                         conversation_stage = "TRANSFERRING_TO_AGENT"
                                         interaction_complete = True
                                         # Wait for a moment before closing to ensure transfer message is sent
@@ -1499,22 +1507,22 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                     else:
                                         logger.websocket.warning("⚠️ Goodbye already sent, ignoring duplicate request")
                                 else:
-                                    # # agent_question_repeat_count += 1
-                                    # if agent_question_repeat_count <= 2:  # Limit to 2 repeats
-                                    #     logger.websocket.info(f"Unclear response to agent connect. Repeating question (attempt {agent_question_repeat_count}/2).")
-                                    #     logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
-                                    #     await play_agent_connect_question(websocket, call_detected_lang)
-                                    #     # Reset the timer to wait for user response
-                                    #     last_transcription_time = time.time()
-                                    # else:
-                                    #     logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
-                                    #     logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
-                                    #     customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                    #     # await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                    #     conversation_stage = "TRANSFERRING_TO_AGENT"
-                                    #     interaction_complete = True
-                                    #     # Wait for transfer message to be sent before closing
-                                    #     await asyncio.sleep(2)
+                                    agent_question_repeat_count += 1
+                                    if agent_question_repeat_count <= 2:  # Limit to 2 repeats
+                                        logger.websocket.info(f"Unclear response to agent connect. Repeating question (attempt {agent_question_repeat_count}/2).")
+                                        logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                                        await play_agent_connect_question(websocket, call_detected_lang)
+                                        # Reset the timer to wait for user response
+                                        last_transcription_time = time.time()
+                                    else:
+                                        logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
+                                        logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
+                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                        conversation_stage = "TRANSFERRING_TO_AGENT"
+                                        interaction_complete = True
+                                        # Wait for transfer message to be sent before closing
+                                        await asyncio.sleep(2)
                                         break
                             # Add more elif conditions here for additional conversation stages if your flow extends
                     except Exception as e:
@@ -1583,12 +1591,13 @@ class CustomerData(BaseModel):
     language_code: str
 
 @app.post("/api/upload-customers")
-async def upload_customers(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+async def upload_customers(file: UploadFile = File(...), current_user: dict = Depends(get_current_user_optional)):
     """
     Accepts a CSV or Excel file, processes it, and stores customer data in the database.
-    Requires authentication.
+    Authentication optional for development.
     """
-    print(f"📁 [CHECKPOINT] /api/upload-customers endpoint hit by user: {current_user.get('email', 'unknown')}")
+    user_email = current_user.get('email', 'anonymous') if current_user else 'anonymous'
+    print(f"📁 [CHECKPOINT] /api/upload-customers endpoint hit by user: {user_email}")
     print(f"📁 [CHECKPOINT] File name: {file.filename}")
     print(f"📁 [CHECKPOINT] File content type: {file.content_type}")
     
@@ -1600,12 +1609,14 @@ async def upload_customers(file: UploadFile = File(...), current_user: dict = De
         print(f"📁 [CHECKPOINT] File processing result: {result}")
         
         # Log the action with user information
-        logger.info(f"User {current_user.get('email')} uploaded customer file: {file.filename}")
+        logger.info(f"User {user_email} uploaded customer file: {file.filename}")
         
         return result
     except Exception as e:
         print(f"❌ [CHECKPOINT] Exception in upload_customers endpoint: {e}")
-        logger.error(f"Upload customers error for user {current_user.get('email')}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        logger.error(f"Upload customers error for user {user_email}: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @app.post("/api/trigger-single-call")
@@ -1653,41 +1664,232 @@ async def trigger_bulk_calls(customer_ids: list[str] = Body(..., embed=True), cu
         logger.error(f"Trigger bulk calls error for user {current_user.get('email')}: {str(e)}")
         return {"success": False, "error": str(e)}
 
+def safe_float_conversion(value):
+    """Safely convert a value to float, handling edge cases"""
+    if not value or value in ['None', '', 'null', 'undefined', 'N/A']:
+        return 0
+    
+    # If it's already a number
+    if isinstance(value, (int, float)):
+        return float(value)
+    
+    # Convert to string and clean
+    str_value = str(value).strip()
+    
+    # Remove currency symbols and common formatting
+    str_value = str_value.replace('₹', '').replace(',', '').replace(' ', '')
+    
+    # Handle date-like formats or other non-numeric strings
+    if '/' in str_value or '-' in str_value or ':' in str_value:
+        return 0
+    
+    try:
+        return float(str_value)
+    except (ValueError, TypeError):
+        return 0
+
 @app.get("/api/customers")
-async def get_all_customers(current_user: dict = Depends(get_current_user)):
+async def get_all_customers(current_user: dict = Depends(get_current_user_optional)):
     """
-    Retrieves all customers from the database.
-    Requires authentication.
+    Retrieves all customers from the database with loans relationship.
+    Authentication optional for development.
     """
-    print(f"👥 [CHECKPOINT] /api/customers endpoint hit by user: {current_user.get('email', 'unknown')}")
+    user_email = current_user.get('email', 'anonymous') if current_user else 'anonymous'
+    print(f"👥 [CHECKPOINT] /api/customers endpoint hit by user: {user_email}")
     
     session = db_manager.get_session()
     try:
-        customers = session.query(Customer).all()
+        # Import joinedload for relationship loading
+        from sqlalchemy.orm import joinedload, selectinload
+        
+        # Load customers with optimized relationship loading
+        # Use selectinload for better performance with many customers
+        customers = session.query(Customer).options(
+            selectinload(Customer.loans),
+            selectinload(Customer.call_sessions)
+        ).order_by(Customer.created_at.desc()).limit(1000).all()  # Limit for performance
+        
         print(f"👥 [CHECKPOINT] Found {len(customers)} customers in database")
         
         # Log the action with user information
-        logger.info(f"User {current_user.get('email')} accessed customer list ({len(customers)} customers)")
+        logger.info(f"User {user_email} accessed customer list ({len(customers)} customers)")
         
-        result = [
-            {
-                "id": str(c.id),
-                "name": c.name,
-                "phone_number": c.phone_number,
-                "language_code": c.language_code,
-                "loan_id": c.loan_id,
-                "amount": c.amount,
-                "due_date": c.due_date,
-                "state": c.state,
-                "created_at": c.created_at.isoformat()
-            } for c in customers
-        ]
+        result = []
+        for c in customers:
+            # Prepare loans data with better error handling
+            loans_data = []
+            if hasattr(c, 'loans') and c.loans:
+                loans_data = []
+                for loan in c.loans:
+                    try:
+                        loan_dict = {
+                            "id": str(loan.id),
+                            "loan_id": loan.loan_id,
+                            "outstanding_amount": float(loan.outstanding_amount) if loan.outstanding_amount else 0,
+                            "due_amount": float(loan.due_amount) if loan.due_amount else 0,
+                            "next_due_date": loan.next_due_date.isoformat() if loan.next_due_date else None,
+                            "last_paid_date": loan.last_paid_date.isoformat() if loan.last_paid_date else None,
+                            "last_paid_amount": float(loan.last_paid_amount) if loan.last_paid_amount else 0,
+                            "status": loan.status or "active",
+                            "cluster": loan.cluster or "Unknown",
+                            "branch": loan.branch or "Unknown",
+                            "branch_contact_number": loan.branch_contact_number or "N/A",
+                            "employee_name": loan.employee_name or "Unknown",
+                            "employee_id": loan.employee_id or "Unknown",
+                            "employee_contact_number": loan.employee_contact_number or "N/A"
+                        }
+                        loans_data.append(loan_dict)
+                    except Exception as loan_error:
+                        print(f"⚠️ Error processing loan for customer {c.id}: {loan_error}")
+                        continue
+            
+            # Get call status (most recent call)
+            call_status = 'ready'
+            if hasattr(c, 'call_sessions') and c.call_sessions:
+                recent_call = max(c.call_sessions, key=lambda x: x.initiated_at)
+                call_status = recent_call.status or 'ready'
+            
+            try:
+                customer_data = {
+                    "id": str(c.id),
+                    "name": c.name or "Unknown",  # Uses backward compatibility property
+                    "phone_number": c.phone_number or "Unknown",  # Uses backward compatibility property
+                    "language_code": getattr(c, 'language_code', 'hi-IN'),
+                    "loan_id": c.loan_id or (loans_data[0].get("loan_id") if loans_data else "Unknown"),
+                    "amount": c.amount or (f"₹{loans_data[0].get('outstanding_amount', 0):,.0f}" if loans_data else "₹0"),
+                    "due_date": c.due_date or (loans_data[0].get("next_due_date") if loans_data else "N/A"),
+                    "state": c.state or "Unknown",
+                    "created_at": c.created_at.isoformat() if hasattr(c, 'created_at') and c.created_at else datetime.now().isoformat(),
+                    "call_status": call_status,
+                    "upload_date": c.first_uploaded_at.isoformat() if hasattr(c, 'first_uploaded_at') and c.first_uploaded_at else c.created_at.isoformat(),
+                    "loans": loans_data,  # New loans relationship data
+                    
+                    # Additional fields the frontend expects
+                    "cluster": loans_data[0].get("cluster", "Unknown") if loans_data else getattr(c, 'cluster', 'Unknown'),
+                    "branch": loans_data[0].get("branch", "Unknown") if loans_data else getattr(c, 'branch', 'Unknown'), 
+                    "branch_contact": loans_data[0].get("branch_contact_number", "N/A") if loans_data else getattr(c, 'branch_contact', 'N/A'),
+                    "employee_name": loans_data[0].get("employee_name", "Unknown") if loans_data else getattr(c, 'employee_name', 'Unknown'),
+                    "employee_id": loans_data[0].get("employee_id", "Unknown") if loans_data else getattr(c, 'employee_id', 'Unknown'),
+                    "employee_contact": loans_data[0].get("employee_contact_number", "N/A") if loans_data else getattr(c, 'employee_contact', 'N/A'),
+                    "last_paid_date": loans_data[0].get("last_paid_date") if loans_data else getattr(c, 'last_paid_date', None),
+                    "last_paid_amount": loans_data[0].get("last_paid_amount", 0) if loans_data else getattr(c, 'last_paid_amount', 0),
+                    "due_amount": loans_data[0].get("due_amount", 0) if loans_data else safe_float_conversion(c.amount)
+                }
+                result.append(customer_data)
+            except Exception as customer_error:
+                print(f"⚠️ Error processing customer {c.id}: {customer_error}")
+                continue
         
         print(f"👥 [CHECKPOINT] Returning customer list successfully")
         return result
     except Exception as e:
         print(f"❌ [CHECKPOINT] Exception in get_all_customers endpoint: {e}")
+        import traceback
+        traceback.print_exc()
         return []
+    finally:
+        session.close()
+
+@app.get("/api/uploaded-files")
+async def get_uploaded_files(current_user: dict = Depends(get_current_user_optional)):
+    """
+    Get list of uploaded files/batches
+    """
+    session = db_manager.get_session()
+    try:
+        from database.schemas import FileUpload
+        uploads = session.query(FileUpload).order_by(FileUpload.uploaded_at.desc()).all()
+        
+        result = []
+        for upload in uploads:
+            result.append({
+                "id": str(upload.id),
+                "filename": upload.filename,
+                "uploaded_at": upload.uploaded_at.isoformat(),
+                "uploaded_by": upload.uploaded_by,
+                "total_records": upload.total_records,
+                "processed_records": upload.processed_records,
+                "success_records": upload.success_records,
+                "failed_records": upload.failed_records,
+                "status": upload.status
+            })
+        
+        return result
+    except Exception as e:
+        print(f"❌ Error getting uploaded files: {e}")
+        return []
+    finally:
+        session.close()
+
+@app.get("/api/uploaded-files/ids")
+async def get_uploaded_file_ids(current_user: dict = Depends(get_current_user_optional)):
+    """
+    Get list of uploaded file IDs for batch selection
+    """
+    session = db_manager.get_session()
+    try:
+        from database.schemas import FileUpload
+        uploads = session.query(FileUpload).order_by(FileUpload.uploaded_at.desc()).all()
+        
+        result = []
+        for upload in uploads:
+            result.append({
+                "id": str(upload.id),
+                "filename": upload.filename,
+                "uploaded_at": upload.uploaded_at.isoformat(),
+                "total_records": upload.total_records,
+                "status": upload.status
+            })
+        
+        return result
+    except Exception as e:
+        print(f"❌ Error getting uploaded file IDs: {e}")
+        return []
+    finally:
+        session.close()
+
+@app.get("/api/uploaded-files/{batch_id}/details")
+async def get_batch_details(batch_id: str, current_user: dict = Depends(get_current_user_optional)):
+    """
+    Get detailed information about a specific batch
+    """
+    session = db_manager.get_session()
+    try:
+        from database.schemas import FileUpload, UploadRow
+        
+        upload = session.query(FileUpload).filter(FileUpload.id == batch_id).first()
+        if not upload:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        
+        # Get upload rows for this batch
+        rows = session.query(UploadRow).filter(UploadRow.file_upload_id == batch_id).all()
+        
+        return {
+            "id": str(upload.id),
+            "filename": upload.filename,
+            "uploaded_at": upload.uploaded_at.isoformat(),
+            "uploaded_by": upload.uploaded_by,
+            "total_records": upload.total_records,
+            "processed_records": upload.processed_records,
+            "success_records": upload.success_records,
+            "failed_records": upload.failed_records,
+            "status": upload.status,
+            "processing_errors": upload.processing_errors,
+            "rows": [
+                {
+                    "id": str(row.id),
+                    "line_number": row.line_number,
+                    "phone_normalized": row.phone_normalized,
+                    "status": row.status,
+                    "error": row.error,
+                    "match_customer_id": str(row.match_customer_id) if row.match_customer_id else None,
+                    "match_loan_id": str(row.match_loan_id) if row.match_loan_id else None
+                } for row in rows
+            ]
+        }
+    except Exception as e:
+        print(f"❌ Error getting batch details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
 
@@ -1914,7 +2116,7 @@ async def old_websocket_endpoint(websocket: WebSocket):
                     }))
                     return
                 
-                # 4. Validate customer data has required fields
+                # 4. Validate customer data has required fields (allow placeholder values)
                 required_fields = ['name', 'loan_id', 'amount', 'due_date']
                 missing_fields = [field for field in required_fields if not customer_info.get(field)]
                 if missing_fields:
@@ -1925,6 +2127,14 @@ async def old_websocket_endpoint(websocket: WebSocket):
                         "message": f"Customer data incomplete. Missing fields: {', '.join(missing_fields)}"
                     }))
                     return
+                
+                # Convert placeholder values to generic terms for speech
+                if customer_info.get('loan_id') in ['Unknown', 'N/A', None]:
+                    customer_info['loan_id'] = '1234'  # Generic loan ID for speech
+                if customer_info.get('amount') in ['Unknown', 'N/A', '₹0', None]:
+                    customer_info['amount'] = '5000'  # Generic amount for speech
+                if customer_info.get('due_date') in ['Unknown', 'N/A', None]:
+                    customer_info['due_date'] = 'this month'  # Generic due date for speech
                 
                 print(f"[Compatibility] ✅ Customer data validated: {customer_info['name']} - Loan: {customer_info['loan_id']}, Amount: ₹{customer_info['amount']}")
                 
@@ -1998,19 +2208,19 @@ async def old_websocket_endpoint(websocket: WebSocket):
                             await play_did_not_hear_response(websocket, call_detected_lang)
                             last_transcription_time = time.time()
                         elif conversation_stage == "WAITING_AGENT_RESPONSE":
-                            # agent_question_repeat_count += 1
-                            # if agent_question_repeat_count <= 2:
-                            #     logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
-                            #     logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
-                            #     await play_agent_connect_question(websocket, call_detected_lang)
-                            #     last_transcription_time = time.time()
-                            # else:
-                            #     logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
-                            #     logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
-                            #     customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                            #     # await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                            #     conversation_stage = "TRANSFERRING_TO_AGENT"
-                            #     interaction_complete = True
+                            agent_question_repeat_count += 1
+                            if agent_question_repeat_count <= 2:
+                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
+                                logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                                await play_agent_connect_question(websocket, call_detected_lang)
+                                last_transcription_time = time.time()
+                            else:
+                                logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
+                                logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
+                                customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                conversation_stage = "TRANSFERRING_TO_AGENT"
+                                interaction_complete = True
                                 await asyncio.sleep(2)
                                 break
                         audio_buffer.clear()
@@ -2103,7 +2313,7 @@ async def old_websocket_endpoint(websocket: WebSocket):
                             elif conversation_stage == "WAITING_AGENT_RESPONSE":
                                 try:
                                     intent = detect_intent_with_claude(transcript, call_detected_lang)
-                                    logger.websocket.info(f"Claude detected : {intent}")
+                                    logger.websocket.info(f"Claude detected intent: {intent}")
                                     logger.log_call_event("INTENT_DETECTED_CLAUDE", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript})
                                 except Exception as e:
                                     logger.websocket.error(f"❌ Error in Claude intent detection: {e}")
@@ -2116,7 +2326,7 @@ async def old_websocket_endpoint(websocket: WebSocket):
                                         logger.websocket.info("User affirmed agent transfer. Initiating transfer.")
                                         logger.log_call_event("AGENT_TRANSFER_INITIATED", call_sid, customer_info['name'], {"intent": intent})
                                         customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                        # await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
                                         conversation_stage = "TRANSFERRING_TO_AGENT"
                                         interaction_complete = True
                                         await asyncio.sleep(2)
@@ -2135,20 +2345,20 @@ async def old_websocket_endpoint(websocket: WebSocket):
                                     else:
                                         logger.websocket.warning("⚠️ Goodbye already sent, ignoring duplicate request")
                                 else:
-                                    # agent_question_repeat_count += 1
-                                    # if agent_question_repeat_count <= 2:
-                                    #     logger.websocket.info(f"Unclear response to agent connect. Repeating question (attempt {agent_question_repeat_count}/2).")
-                                    #     logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
-                                    #     await play_agent_connect_question(websocket, call_detected_lang)
-                                    #     last_transcription_time = time.time()
-                                    # else:
-                                    #     logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
-                                    #     logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
-                                    #     customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                    #     # await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                    #     conversation_stage = "TRANSFERRING_TO_AGENT"
-                                    #     interaction_complete = True
-                                    #     await asyncio.sleep(2)
+                                    agent_question_repeat_count += 1
+                                    if agent_question_repeat_count <= 2:
+                                        logger.websocket.info(f"Unclear response to agent connect. Repeating question (attempt {agent_question_repeat_count}/2).")
+                                        logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                                        await play_agent_connect_question(websocket, call_detected_lang)
+                                        last_transcription_time = time.time()
+                                    else:
+                                        logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
+                                        logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
+                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
+                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
+                                        conversation_stage = "TRANSFERRING_TO_AGENT"
+                                        interaction_complete = True
+                                        await asyncio.sleep(2)
                                         break
                     except Exception as e:
                         logger.websocket.error(f"❌ Error processing transcript: {e}")

@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 # --- Configuration ---
 load_dotenv()
-BASE_URL = os.getenv('BASE_URL', 'https://collections.intalksai.com/')
+BASE_URL = os.getenv('BASE_URL', 'https://31cafa13a316.ngrok-free.app')
 LOG_FILE = "monitor_aws.log"
 MONITORING_INTERVAL_SECONDS = 300
 

@@ -14,9 +14,10 @@ from urllib.parse import urlencode
 from dotenv import load_dotenv
 
 from database.schemas import (
-    DatabaseManager, Customer, CallSession, CallStatusUpdate, FileUpload,
+    DatabaseManager, Customer, CallSession, CallStatusUpdate, FileUpload, Loan,
     CallStatus, get_customer_by_phone, create_customer, create_call_session,
-    update_call_status, get_call_session_by_sid, db_manager
+    update_call_status, get_call_session_by_sid, db_manager, create_loan,
+    get_loan_by_external_id, compute_fingerprint
 )
 from utils.redis_session import redis_manager
 from utils.handler_asr import SarvamHandler
@@ -41,10 +42,12 @@ class CallManagementService:
         """Process uploaded customer file and store in database"""
         session = self.db_manager.get_session()
         try:
-            # Create file upload record
+            # Create file upload record using new schema structure
             file_upload = FileUpload(
                 filename=filename,
-                upload_status='processing'
+                uploaded_by='system',  # Add required field
+                status='processing',   # Use correct field name
+                total_records=0        # Will be updated after parsing
             )
             session.add(file_upload)
             session.commit()
@@ -60,19 +63,67 @@ class CallManagementService:
             
             for customer_data in customers_data:
                 try:
-                    # Check if customer exists
+                    # Check if customer exists by phone
                     existing_customer = get_customer_by_phone(session, customer_data['phone_number'])
                     
                     if existing_customer:
                         # Update existing customer
+                        from datetime import datetime as dt
                         for key, value in customer_data.items():
                             if hasattr(existing_customer, key) and value:
                                 setattr(existing_customer, key, value)
-                        existing_customer.updated_at = datetime.utcnow()
+                        existing_customer.updated_at = dt.utcnow()
                         customer = existing_customer
+                        print(f"✅ Updated existing customer: {customer.name}")
                     else:
-                        # Create new customer
+                        # Create new customer with enhanced fingerprinting
+                        from database.schemas import compute_fingerprint
+                        
+                        # Ensure fingerprint is generated properly
+                        if not customer_data.get('fingerprint'):
+                            customer_data['fingerprint'] = compute_fingerprint(
+                                customer_data.get('phone_number', ''),
+                                customer_data.get('national_id', '')
+                            )
+                        
                         customer = create_customer(session, customer_data)
+                        if not customer:
+                            raise Exception("Failed to create customer")
+                        print(f"✅ Created new customer: {customer.name}")
+                    
+                    # Create loan record if loan data exists
+                    if customer_data.get('loan_id') and customer.id:
+                        from database.schemas import Loan, get_loan_by_external_id
+                        
+                        # Check if loan already exists
+                        existing_loan = get_loan_by_external_id(session, customer_data['loan_id'])
+                        
+                        if not existing_loan:
+                            # Create new loan record
+                            loan_data = {
+                                'customer_id': customer.id,
+                                'loan_id': customer_data['loan_id'],
+                                'outstanding_amount': self._parse_amount(customer_data.get('amount', '0')),
+                                'due_amount': self._parse_amount(customer_data.get('amount', '0')),
+                                'status': 'active',
+                                'cluster': customer_data.get('cluster'),
+                                'branch': customer_data.get('branch'),
+                                'employee_name': customer_data.get('employee_name'),
+                                'employee_id': customer_data.get('employee_id')
+                            }
+                            
+                            # Parse due date
+                            if customer_data.get('due_date'):
+                                try:
+                                    from datetime import datetime
+                                    loan_data['next_due_date'] = datetime.strptime(
+                                        customer_data['due_date'], '%Y-%m-%d'
+                                    ).date()
+                                except:
+                                    pass  # Skip invalid dates
+                            
+                            loan = create_loan(session, loan_data)
+                            print(f"✅ Created loan: {loan.loan_id} for customer {customer.name}")
                     
                     processed_customers.append({
                         'id': str(customer.id),
@@ -82,7 +133,7 @@ class CallManagementService:
                         'loan_id': customer.loan_id,
                         'amount': customer.amount,
                         'due_date': customer.due_date,
-                        'language_code': customer.language_code
+                        'language_code': getattr(customer, 'language_code', 'hi-IN')
                     })
                     
                 except Exception as e:
@@ -91,12 +142,16 @@ class CallManagementService:
                         'customer_data': customer_data,
                         'error': str(e)
                     })
+                    print(f"❌ Failed to process customer: {e}")
+                    import traceback
+                    traceback.print_exc()
             
-            # Update file upload record
+            # Update file upload record with proper field names
             file_upload.processed_records = len(processed_customers)
+            file_upload.success_records = len(processed_customers)  # Add this field
             file_upload.failed_records = failed_records
             file_upload.processing_errors = processing_errors
-            file_upload.upload_status = 'completed' if failed_records == 0 else 'partial_failure'
+            file_upload.status = 'completed' if failed_records == 0 else 'partial_failure'  # Use correct field name
             session.commit()
             
             # Store in Redis for quick access
@@ -117,16 +172,19 @@ class CallManagementService:
             return {
                 'success': True,
                 'upload_id': str(file_upload.id),
-                'total_records': file_upload.total_records,
-                'processed_records': file_upload.processed_records,
-                'failed_records': failed_records,
+                'processing_results': {  # Wrap in processing_results as frontend expects
+                    'total_records': file_upload.total_records,
+                    'processed_records': file_upload.processed_records,
+                    'success_records': file_upload.success_records,
+                    'failed_records': failed_records
+                },
                 'customers': processed_customers,
                 'temp_key': temp_key
             }
             
         except Exception as e:
             if 'file_upload' in locals():
-                file_upload.upload_status = 'failed'
+                file_upload.status = 'failed'  # Use correct field name
                 file_upload.processing_errors = [{'error': str(e)}]
                 session.commit()
             
@@ -537,6 +595,26 @@ class CallManagementService:
             self.db_manager.close_session(session)
     
     # Helper methods
+    def _parse_amount(self, amount_str: str) -> float:
+        """Parse amount string to float, handling various formats"""
+        if not amount_str or amount_str in ['', 'nan', 'null', 'None']:
+            return 0.0
+        
+        # Convert to string and clean
+        amount_str = str(amount_str).strip()
+        
+        # Remove currency symbols and commas
+        amount_str = amount_str.replace('₹', '').replace(',', '').replace(' ', '')
+        
+        # Handle date-like formats or other non-numeric strings
+        if '/' in amount_str or ':' in amount_str:
+            return 0.0
+        
+        try:
+            return float(amount_str)
+        except (ValueError, TypeError):
+            return 0.0
+    
     async def _parse_customer_file(self, file_data: bytes, filename: str) -> List[Dict[str, Any]]:
         """Parse uploaded customer file"""
         import pandas as pd
@@ -569,14 +647,35 @@ class CallManagementService:
             # Expected columns mapping (normalized -> internal field name)
             column_mapping = {
                 'name': 'name',
+                'customer_name': 'name',
+                'full_name': 'name',
                 'phone': 'phone_number',
                 'phone_number': 'phone_number',
+                'mobile': 'phone_number',
+                'contact': 'phone_number',
                 'state': 'state',
                 'loan_id': 'loan_id',
-                'loan_ID': 'loan_id',  # Handle "Loan ID" case
+                'loan_ID': 'loan_id',
+                'loanid': 'loan_id',
                 'amount': 'amount',
+                'loan_amount': 'amount',
+                'outstanding_amount': 'amount',
                 'due_date': 'due_date',
-                'due_DATE': 'due_date'  # Handle "Due Date" case
+                'due_DATE': 'due_date',
+                'next_due_date': 'due_date',
+                'cluster': 'cluster',
+                'branch': 'branch',
+                'employee_name': 'employee_name',
+                'employee': 'employee_name',
+                'emp_name': 'employee_name',
+                'employee_id': 'employee_id',
+                'emp_id': 'employee_id',
+                'employee_contact': 'employee_contact',
+                'emp_contact': 'employee_contact',
+                'last_paid_amount': 'last_paid_amount',
+                'last_payment': 'last_paid_amount',
+                'last_paid_date': 'last_paid_date',
+                'last_payment_date': 'last_paid_date'
             }
             
             customers = []
