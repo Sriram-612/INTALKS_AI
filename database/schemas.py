@@ -721,14 +721,23 @@ def create_customer(session, customer_data: dict) -> Optional[Customer]:
 
 
 def create_loan(session: Session, loan_data: dict) -> Loan:
-    """Create a new loan"""
+    """Create a new loan with all enhanced fields"""
     loan = Loan(
         customer_id=loan_data['customer_id'],
         loan_id=loan_data['loan_id'],
         principal_amount=loan_data.get('principal_amount'),
         outstanding_amount=loan_data.get('outstanding_amount'),
+        due_amount=loan_data.get('due_amount'),
         next_due_date=loan_data.get('next_due_date'),
-        status=loan_data.get('status', 'active')
+        last_paid_date=loan_data.get('last_paid_date'),
+        last_paid_amount=loan_data.get('last_paid_amount'),
+        status=loan_data.get('status', 'active'),
+        cluster=loan_data.get('cluster'),
+        branch=loan_data.get('branch'),
+        branch_contact_number=loan_data.get('branch_contact_number'),
+        employee_name=loan_data.get('employee_name'),
+        employee_id=loan_data.get('employee_id'),
+        employee_contact_number=loan_data.get('employee_contact_number')
     )
     
     session.add(loan)

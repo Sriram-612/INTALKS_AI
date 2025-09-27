@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="woman">
+        Namaste! This is a call from your loan service. 
+        We are calling regarding your loan account. 
+        Please stay on the line to speak with our representative.
+    </Say>
+    
+    <Pause length="2"/>
+    
+    <Say voice="woman">
+        Press 1 to speak to our agent for loan assistance,
+        Press 2 to get your current balance information,
+        Press 3 to make a payment,
+        or Press 0 to repeat this menu.
+    </Say>
+    
+    <Gather numDigits="1" timeout="10" finishOnKey="#" action="http://4ee3feb8d5e0.ngrok-free.app/handle-dtmf">
+        <Say voice="woman">Please press a number from 1 to 3, or 0 to repeat.</Say>
+    </Gather>
+    
+    <Say voice="woman">
+        We did not receive your input. 
+        Connecting you to our agent now. 
+        Please hold the line.
+    </Say>
+    
+    <Dial>
+        <Number>+917417119014</Number>
+    </Dial>
+    
+</Response>

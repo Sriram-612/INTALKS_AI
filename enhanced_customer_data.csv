@@ -1,0 +1,5 @@
+Name,Phone,Loan ID,Amount,Due Date,State,Cluster,Branch,Branch Contact,Employee,Employee ID,Employee Contact,Last Paid Date,Last Paid Amount,Due Amount
+Rahul Sharma,9876543210,LN1001,50000,2025-10-15,Maharashtra,Cluster A,Mumbai Branch,+912233445566,John Doe,EMP001,+919876543211,2025-09-01,10000,40000
+Priya Nair,9123456780,LN1002,75000,2025-11-05,Kerala,Cluster B,Kerala Branch,+914433221100,Jane Smith,EMP002,+919876543212,2025-08-15,25000,50000
+Amit Patel,9988776655,LN1003,30000,2025-10-20,Gujarat,Cluster A,Gujarat Branch,+917766554433,Bob Johnson,EMP003,+919876543213,2025-09-10,5000,25000
+Sneha Gupta,9871234567,LN1004,90000,2025-12-01,Uttar Pradesh,Cluster C,UP Branch,+918899776655,Alice Wilson,EMP004,+919876543214,2025-08-30,20000,70000

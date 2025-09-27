@@ -6,6 +6,10 @@ Handles the complete call lifecycle with database and Redis integration
 import uuid
 import json
 import asyncio
+import io
+import re
+import pandas as pd
+import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 import httpx
@@ -21,6 +25,7 @@ from database.schemas import (
 )
 from utils.redis_session import redis_manager
 from utils.handler_asr import SarvamHandler
+from utils.logger import logger
 
 load_dotenv()
 
@@ -39,63 +44,81 @@ class CallManagementService:
         self.agent_phone_number = os.getenv("AGENT_PHONE_NUMBER")
         
     async def upload_and_process_customers(self, file_data: bytes, filename: str, websocket_id: str = None) -> Dict[str, Any]:
-        """Process uploaded customer file and store in database"""
+        """Process uploaded customer file and store in database with date-based tracking"""
         session = self.db_manager.get_session()
         try:
+            logger.info(f"Starting customer file upload: {filename}")
+            
             # Create file upload record using new schema structure
             file_upload = FileUpload(
                 filename=filename,
-                uploaded_by='system',  # Add required field
-                status='processing',   # Use correct field name
-                total_records=0        # Will be updated after parsing
+                uploaded_by='system',
+                status='processing',
+                total_records=0
             )
             session.add(file_upload)
             session.commit()
             session.refresh(file_upload)
             
+            logger.database.info(f"Created file upload record with ID: {file_upload.id}")
+            
             # Parse the file (assuming CSV/Excel)
             customers_data = await self._parse_customer_file(file_data, filename)
             file_upload.total_records = len(customers_data)
             
+            logger.info(f"Parsed {len(customers_data)} customer records from {filename}")
+            
             processed_customers = []
             failed_records = 0
             processing_errors = []
+            current_upload_date = datetime.utcnow().date()
             
-            for customer_data in customers_data:
+            for idx, customer_data in enumerate(customers_data):
                 try:
-                    # Check if customer exists by phone
-                    existing_customer = get_customer_by_phone(session, customer_data['phone_number'])
+                    phone_number = customer_data.get('phone_number')
                     
-                    if existing_customer:
-                        # Update existing customer
-                        from datetime import datetime as dt
+                    if not phone_number:
+                        raise ValueError("Phone number is required")
+                    
+                    # Check if customer already exists
+                    existing_any_date = get_customer_by_phone(session, phone_number)
+                    
+                    if existing_any_date:
+                        # Customer already exists - UPDATE the existing record
+                        customer = existing_any_date
+                        
+                        # Update customer fields with new data
                         for key, value in customer_data.items():
-                            if hasattr(existing_customer, key) and value:
-                                setattr(existing_customer, key, value)
-                        existing_customer.updated_at = dt.utcnow()
-                        customer = existing_customer
-                        print(f"✅ Updated existing customer: {customer.name}")
+                            if hasattr(customer, key) and value is not None and key not in ['id', 'created_at', 'fingerprint']:
+                                setattr(customer, key, value)
+                        
+                        customer.updated_at = datetime.utcnow()
+                        session.commit()
+                        
+                        logger.info(f"✅ Updated existing customer: {customer.full_name} (Phone: {phone_number})")
                     else:
-                        # Create new customer with enhanced fingerprinting
-                        from database.schemas import compute_fingerprint
+                        # First-time customer - CREATE new record
                         
                         # Ensure fingerprint is generated properly
                         if not customer_data.get('fingerprint'):
                             customer_data['fingerprint'] = compute_fingerprint(
-                                customer_data.get('phone_number', ''),
+                                phone_number,
                                 customer_data.get('national_id', '')
                             )
                         
+                        # Set first upload date
+                        customer_data['first_uploaded_at'] = datetime.utcnow()
+                        
+                        logger.info(f"Processing first-time customer: {customer_data.get('name', 'Unknown')} (Phone: {phone_number})")
+                        
                         customer = create_customer(session, customer_data)
                         if not customer:
-                            raise Exception("Failed to create customer")
-                        print(f"✅ Created new customer: {customer.name}")
+                            raise Exception("Failed to create customer record")
+                        
+                        logger.info(f"✅ First-time customer created: {customer.full_name} (Upload Date: {current_upload_date})")
                     
                     # Create loan record if loan data exists
                     if customer_data.get('loan_id') and customer.id:
-                        from database.schemas import Loan, get_loan_by_external_id
-                        
-                        # Check if loan already exists
                         existing_loan = get_loan_by_external_id(session, customer_data['loan_id'])
                         
                         if not existing_loan:
@@ -104,27 +127,50 @@ class CallManagementService:
                                 'customer_id': customer.id,
                                 'loan_id': customer_data['loan_id'],
                                 'outstanding_amount': self._parse_amount(customer_data.get('amount', '0')),
-                                'due_amount': self._parse_amount(customer_data.get('amount', '0')),
+                                'due_amount': self._parse_amount(customer_data.get('due_amount', customer_data.get('amount', '0'))),
                                 'status': 'active',
                                 'cluster': customer_data.get('cluster'),
                                 'branch': customer_data.get('branch'),
+                                'branch_contact_number': customer_data.get('branch_contact'),
                                 'employee_name': customer_data.get('employee_name'),
-                                'employee_id': customer_data.get('employee_id')
+                                'employee_id': customer_data.get('employee_id'),
+                                'employee_contact_number': customer_data.get('employee_contact'),
+                                'last_paid_amount': self._parse_amount(customer_data.get('last_paid_amount', '0')),
                             }
                             
                             # Parse due date
                             if customer_data.get('due_date'):
                                 try:
-                                    from datetime import datetime
-                                    loan_data['next_due_date'] = datetime.strptime(
-                                        customer_data['due_date'], '%Y-%m-%d'
-                                    ).date()
-                                except:
-                                    pass  # Skip invalid dates
+                                    # Try multiple date formats
+                                    due_date_str = str(customer_data['due_date']).strip()
+                                    if due_date_str and due_date_str.lower() != 'nan':
+                                        for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y']:
+                                            try:
+                                                loan_data['next_due_date'] = datetime.strptime(due_date_str, fmt).date()
+                                                break
+                                            except ValueError:
+                                                continue
+                                except Exception as e:
+                                    logger.warning(f"Invalid due date format for loan {customer_data['loan_id']}: {customer_data['due_date']} - {e}")
+                            
+                            # Parse last paid date
+                            if customer_data.get('last_paid_date'):
+                                try:
+                                    last_paid_str = str(customer_data['last_paid_date']).strip()
+                                    if last_paid_str and last_paid_str.lower() != 'nan':
+                                        for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y']:
+                                            try:
+                                                loan_data['last_paid_date'] = datetime.strptime(last_paid_str, fmt).date()
+                                                break
+                                            except ValueError:
+                                                continue
+                                except Exception as e:
+                                    logger.warning(f"Invalid last paid date format for loan {customer_data['loan_id']}: {customer_data['last_paid_date']} - {e}")
                             
                             loan = create_loan(session, loan_data)
-                            print(f"✅ Created loan: {loan.loan_id} for customer {customer.name}")
+                            logger.info(f"Created loan: {loan.loan_id} for customer {customer.name}")
                     
+                    # Add processed customer to results
                     processed_customers.append({
                         'id': str(customer.id),
                         'name': customer.name,
@@ -133,26 +179,28 @@ class CallManagementService:
                         'loan_id': customer.loan_id,
                         'amount': customer.amount,
                         'due_date': customer.due_date,
+                        'upload_date': current_upload_date.isoformat(),
                         'language_code': getattr(customer, 'language_code', 'hi-IN')
                     })
                     
                 except Exception as e:
                     failed_records += 1
                     processing_errors.append({
+                        'row': idx + 1,
                         'customer_data': customer_data,
                         'error': str(e)
                     })
-                    print(f"❌ Failed to process customer: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"Failed to process customer at row {idx + 1}: {e}", exc_info=True)
             
-            # Update file upload record with proper field names
+            # Update file upload record
             file_upload.processed_records = len(processed_customers)
-            file_upload.success_records = len(processed_customers)  # Add this field
+            file_upload.success_records = len(processed_customers)
             file_upload.failed_records = failed_records
             file_upload.processing_errors = processing_errors
-            file_upload.status = 'completed' if failed_records == 0 else 'partial_failure'  # Use correct field name
+            file_upload.status = 'completed' if failed_records == 0 else 'partial_failure'
             session.commit()
+            
+            logger.info(f"File processing completed: {len(processed_customers)} successful, {failed_records} failed")
             
             # Store in Redis for quick access
             temp_key = f"uploaded_customers_{file_upload.id}"
@@ -172,19 +220,21 @@ class CallManagementService:
             return {
                 'success': True,
                 'upload_id': str(file_upload.id),
-                'processing_results': {  # Wrap in processing_results as frontend expects
+                'processing_results': {
                     'total_records': file_upload.total_records,
                     'processed_records': file_upload.processed_records,
                     'success_records': file_upload.success_records,
-                    'failed_records': failed_records
+                    'failed_records': failed_records,
+                    'upload_date': current_upload_date.isoformat()
                 },
                 'customers': processed_customers,
                 'temp_key': temp_key
             }
             
         except Exception as e:
+            logger.error(f"Error processing customer file upload: {e}", exc_info=True)
             if 'file_upload' in locals():
-                file_upload.status = 'failed'  # Use correct field name
+                file_upload.status = 'failed'
                 file_upload.processing_errors = [{'error': str(e)}]
                 session.commit()
             
@@ -199,12 +249,15 @@ class CallManagementService:
         """Trigger a single outbound call"""
         session = self.db_manager.get_session()
         try:
+            logger.info(f"Triggering single call for customer ID: {customer_id}")
+            
             # Get customer data
             customer = session.query(Customer).filter(Customer.id == customer_id).first()
             if not customer:
+                logger.error(f"Customer with ID {customer_id} not found")
                 return {'success': False, 'error': f"Customer with ID {customer_id} not found"}
             
-            print(f"✅ [CHECKPOINT] Found customer: {customer.name} ({customer.phone_number})")
+            logger.info(f"Found customer: {customer.name} ({customer.phone_number})")
 
             # Generate temporary call ID (before Exotel assigns SID)
             temp_call_id = f"temp_call_{uuid.uuid4().hex[:12]}"
@@ -228,18 +281,18 @@ class CallManagementService:
             # Also store by phone number for easy lookup by WebSocket
             phone_key = f"customer_phone_{customer.phone_number.replace('+', '').replace('-', '').replace(' ', '')}"
             self.redis_manager.store_temp_data(phone_key, customer_data, ttl=3600)
-            print(f"[CallService] Stored customer data in Redis: temp_call_id={temp_call_id}, phone_key={phone_key}")
+            logger.info(f"Stored customer data in Redis: temp_call_id={temp_call_id}, phone_key={phone_key}")
             
             # Store temp_call_id mapping by phone for reverse lookup
             temp_call_key = f"temp_call_phone_{customer.phone_number.replace('+', '').replace('-', '').replace(' ', '')}"
             self.redis_manager.store_temp_data(temp_call_key, temp_call_id, ttl=3600)
             
-            print(f"📞 [CHECKPOINT] About to trigger Exotel call for temp_call_id: {temp_call_id}")
+            logger.info(f"About to trigger Exotel call for temp_call_id: {temp_call_id}")
             # Trigger Exotel call with customer data
             exotel_response = await self._trigger_exotel_call(customer.phone_number, temp_call_id, customer_data)
             
             if exotel_response['success']:
-                print(f"✅ [CHECKPOINT] Exotel call triggered successfully for temp_call_id: {temp_call_id}")
+                logger.info(f"Exotel call triggered successfully for temp_call_id: {temp_call_id}")
                 call_sid = exotel_response['call_sid']
                 
                 # Create database call session with actual Exotel SID
@@ -260,7 +313,7 @@ class CallManagementService:
                     'status': CallStatus.RINGING
                 }
             else:
-                print(f"❌ [CHECKPOINT] Exotel call failed for temp_call_id: {temp_call_id}. Error: {exotel_response.get('error')}")
+                logger.error(f"Exotel call failed for temp_call_id: {temp_call_id}. Error: {exotel_response.get('error')}")
                 # Update Redis session with failure
                 self.redis_manager.update_call_status(temp_call_id, CallStatus.FAILED, f"Failed to initiate call: {exotel_response['error']}")
                 
@@ -271,7 +324,7 @@ class CallManagementService:
                 }
                 
         except Exception as e:
-            print(f"❌ [CRITICAL] Exception in trigger_single_call: {e}")
+            logger.error(f"Exception in trigger_single_call: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
         finally:
             self.db_manager.close_session(session)
@@ -545,7 +598,7 @@ class CallManagementService:
             temp_call_key = f"temp_call_phone_{clean_phone}"
             self.redis_manager.store_temp_data(temp_call_key, temp_call_id, ttl=3600)
             
-            print(f"[CallService] Stored customer data for call: temp_call_id={temp_call_id}, phone_key={phone_key}, name={name}")
+            logger.info(f"Stored customer data for call: temp_call_id={temp_call_id}, phone_key={phone_key}, name={name}")
             
             # Trigger Exotel call with customer data
             exotel_response = await self._trigger_exotel_call(phone_number, temp_call_id, customer_data)
@@ -617,8 +670,7 @@ class CallManagementService:
     
     async def _parse_customer_file(self, file_data: bytes, filename: str) -> List[Dict[str, Any]]:
         """Parse uploaded customer file"""
-        import pandas as pd
-        import io
+        # File parsing logic using pandas
         
         try:
             if filename.endswith('.csv'):
@@ -629,7 +681,7 @@ class CallManagementService:
                 raise ValueError("Unsupported file format")
             
             # Print column names for debugging
-            print(f"📋 CSV Columns found: {list(df.columns)}")
+            logger.info(f"CSV Columns found: {list(df.columns)}")
             
             # Create a case-insensitive column mapping
             def normalize_column_name(col_name):
@@ -642,7 +694,7 @@ class CallManagementService:
                 normalized = normalize_column_name(col)
                 actual_columns[normalized] = col
             
-            print(f"📋 Normalized columns: {actual_columns}")
+            logger.info(f"Normalized columns: {actual_columns}")
             
             # Expected columns mapping (normalized -> internal field name)
             column_mapping = {
@@ -652,6 +704,7 @@ class CallManagementService:
                 'phone': 'phone_number',
                 'phone_number': 'phone_number',
                 'mobile': 'phone_number',
+                'mobile_number': 'phone_number',
                 'contact': 'phone_number',
                 'state': 'state',
                 'loan_id': 'loan_id',
@@ -660,17 +713,21 @@ class CallManagementService:
                 'amount': 'amount',
                 'loan_amount': 'amount',
                 'outstanding_amount': 'amount',
+                'due_amount': 'due_amount',
                 'due_date': 'due_date',
                 'due_DATE': 'due_date',
                 'next_due_date': 'due_date',
                 'cluster': 'cluster',
                 'branch': 'branch',
+                'branch_contact': 'branch_contact',
+                'branch_contact_number': 'branch_contact',
                 'employee_name': 'employee_name',
                 'employee': 'employee_name',
                 'emp_name': 'employee_name',
                 'employee_id': 'employee_id',
                 'emp_id': 'employee_id',
                 'employee_contact': 'employee_contact',
+                'employee_contact_number': 'employee_contact',
                 'emp_contact': 'employee_contact',
                 'last_paid_amount': 'last_paid_amount',
                 'last_payment': 'last_paid_amount',
@@ -693,14 +750,13 @@ class CallManagementService:
                 if not customer_data.get('name'):
                     customer_data['name'] = 'Unknown'
                 if not customer_data.get('phone_number'):
-                    print(f"⚠️ Skipping row with missing phone number: {customer_data}")
+                    logger.warning(f"Skipping row with missing phone number: {customer_data}")
                     continue
                 
                 # Clean phone number (remove spaces, hyphens, parentheses but keep + and digits)
                 phone = customer_data['phone_number']
                 if phone:
                     # Keep only digits and + sign
-                    import re
                     phone = re.sub(r'[^\d+]', '', phone)
                     if not phone.startswith('+'):
                         # Keep the number as-is from CSV, just add +91 prefix (no leading zero removal)
@@ -727,7 +783,7 @@ class CallManagementService:
                 else:
                     customer_data['language_code'] = 'hi-IN'
                 
-                print(f"✅ Parsed customer: {customer_data['name']} - {customer_data['phone_number']}")
+                logger.info(f"Parsed customer: {customer_data['name']} - {customer_data['phone_number']}")
                 customers.append(customer_data)
             
             return customers
@@ -737,9 +793,9 @@ class CallManagementService:
     
     async def _trigger_exotel_call(self, to_number: str, temp_call_id: str, customer_data: Dict[str, Any]) -> Dict[str, Any]:
         """Internal method to trigger Exotel call and connect it to the ExoML flow."""
-        print(f"🎯 [CHECKPOINT] Starting Exotel call trigger process")
-        print(f"🎯 [CHECKPOINT] Target number: {to_number}")
-        print(f"🎯 [CHECKPOINT] Temp call ID: {temp_call_id}")
+        logger.info(f"Starting Exotel call trigger process")
+        logger.info(f"Target number: {to_number}")
+        logger.info(f"Temp call ID: {temp_call_id}")
         
         # The base URL for API calls
         url = f"https://api.exotel.com/v1/Accounts/{self.exotel_sid}/Calls/connect.json"
@@ -748,8 +804,8 @@ class CallManagementService:
         # This is NOT our server's URL, but Exotel's URL for our specific application flow.
         flow_url = f"http://my.exotel.com/{self.exotel_sid}/exoml/start_voice/{self.exotel_flow_app_id}"
 
-        print(f"🎯 [CHECKPOINT] API URL: {url}")
-        print(f"🎯 [CHECKPOINT] Flow URL: {flow_url}")
+        logger.info(f"API URL: {url}")
+        logger.info(f"Flow URL: {flow_url}")
 
         # Add temp_call_id to customer data for tracking
         customer_data['temp_call_id'] = temp_call_id
@@ -775,16 +831,16 @@ class CallManagementService:
             'StatusCallback': f"{os.getenv('BASE_URL', 'https://3.108.35.213')}/exotel-webhook"
         }
         
-        print(f"🎯 [CHECKPOINT] Payload validation:")
-        print(f"   • From (Customer): {payload['From']}")
-        print(f"   • CallerId (ExoPhone): {payload['CallerId']}")
-        print(f"   • Flow URL: {payload['Url']}")
-        print(f"   • CustomField: {custom_field_str[:100]}...")
+        logger.info("Payload validation:")
+        logger.info(f"  • From (Customer): {payload['From']}")
+        logger.info(f"  • CallerId (ExoPhone): {payload['CallerId']}")
+        logger.info(f"  • Flow URL: {payload['Url']}")
+        logger.info(f"  • CustomField: {custom_field_str[:100]}...")
         
-        print(f"📞 [CHECKPOINT] Triggering Exotel call to customer {to_number}")
-        print(f"📦 [CHECKPOINT] CustomField Payload: {custom_field_str}")
-        print(f"🔧 [CHECKPOINT] Debug - API URL: {url}")
-        print(f"🔧 [CHECKPOINT] Debug - Auth: {self.exotel_api_key[:10]}...{self.exotel_api_key[-10:]} / {self.exotel_token[:10]}...{self.exotel_token[-10:]}")
+        logger.info(f"Triggering Exotel call to customer {to_number}")
+        logger.call.info(f"CustomField Payload: {custom_field_str}")
+        logger.info(f"Debug - API URL: {url}")
+        logger.info(f"Debug - Auth: {self.exotel_api_key[:10]}...{self.exotel_api_key[-10:]} / {self.exotel_token[:10]}...{self.exotel_token[-10:]}")
         print(f"🔧 [CHECKPOINT] Debug - Full Payload: {json.dumps(payload, indent=2)}")
 
         try:

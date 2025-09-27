@@ -1,0 +1,2 @@
+Name,Phone,Loan ID,Amount,Due Date,State,Cluster,Branch,Branch Contact,Employee,Employee ID,Employee Contact,Last Paid Date,Last Paid Amount,Due Amount
+Test User,9999999998,TEST123,50000,2025-10-15,Maharashtra,Test Cluster,Test Branch,+912233445566,Test Employee,TEST001,+919876543211,2025-09-01,10000,40000

@@ -40,9 +40,9 @@ from utils.logger import setup_application_logging, logger, AuthError
 from utils.production_asr import ProductionSarvamHandler
 from utils.redis_session import (init_redis, redis_manager,
                                  generate_websocket_session_id)
-# Import authentication module
-from utils.cognito_hosted_auth import cognito_auth, get_current_user, get_current_user_optional
-from utils.session_middleware import RedisSessionMiddleware, get_session
+# Import authentication module - TEMPORARILY COMMENTED OUT FOR TESTING
+# from utils.cognito_hosted_auth import cognito_auth, get_current_user, get_current_user_optional
+# from utils.session_middleware import RedisSessionMiddleware, get_session
 
 
 # --- Lifespan Management ---
@@ -88,18 +88,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Add Redis-based Session middleware for Cognito authentication
-app.add_middleware(
-    RedisSessionMiddleware,
-    secret_key=os.getenv("SESSION_SECRET_KEY", "your-secret-key-change-in-production-123456789"),
-    max_age=3600 * 24 * 7,  # 7 days
-    session_cookie="session_id",
-    redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
-    domain=None,        # Let the browser handle the domain automatically
-    secure=True,        # HTTPS required for ngrok
-    httponly=True,      # Prevent XSS
-    samesite="none"     # Cross-domain cookies for ngrok
-)
+# Add Redis-based Session middleware for Cognito authentication - TEMPORARILY COMMENTED OUT FOR TESTING
+# app.add_middleware(
+#     RedisSessionMiddleware,
+#     secret_key=os.getenv("SESSION_SECRET_KEY", "your-secret-key-change-in-production-123456789"),
+#     max_age=3600 * 24 * 7,  # 7 days
+#     session_cookie="session_id",
+#     redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+#     domain=None,        # Let the browser handle the domain automatically
+#     secure=True,        # HTTPS required for ngrok
+#     httponly=True,      # Prevent XSS
+#     samesite="none"     # Cross-domain cookies for ngrok
+# )
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 sarvam_handler = ProductionSarvamHandler(SARVAM_API_KEY)
@@ -507,10 +507,12 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="static")
 
 # =============================================================================
-# AUTHENTICATION ROUTES
+# AUTHENTICATION ROUTES - TEMPORARILY DISABLED FOR TESTING
 # =============================================================================
+# ALL AUTHENTICATION ROUTES DISABLED FOR TESTING - UNCOMMENT WHEN AUTH IS NEEDED
+# The authentication section has been temporarily removed to allow direct dashboard access
 
-# Pydantic models for request/response
+# Pydantic models for request/response (keeping these for when auth is re-enabled)
 class SignupRequest(BaseModel):
     email: str
     password: str
@@ -528,447 +530,64 @@ class ConfirmSignupRequest(BaseModel):
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
-@app.post("/auth/signup")
-async def signup(request: SignupRequest):
-    """
-    Register a new user with Amazon Cognito
-    
-    Body:
-        email: User's email address
-        password: User's password
-        first_name: Optional first name
-        last_name: Optional last name
-    
-    Returns:
-        JSON response with signup result
-    """
-    try:
-        # Prepare additional attributes
-        additional_attributes = {}
-        if request.first_name:
-            additional_attributes['given_name'] = request.first_name
-        if request.last_name:
-            additional_attributes['family_name'] = request.last_name
-        
-        result = await cognito_auth.signup(
-            email=request.email,
-            password=request.password,
-            additional_attributes=additional_attributes
-        )
-        
-        return JSONResponse(
-            status_code=201,
-            content=result
-        )
-        
-    except AuthError as e:
-        return JSONResponse(
-            status_code=e.status_code,
-            content={"success": False, "message": e.message}
-        )
-    except Exception as e:
-        logger.error(f"Signup error: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": "Internal server error"}
-        )
-
-@app.post("/auth/confirm-signup")
-async def confirm_signup(request: ConfirmSignupRequest):
-    """
-    Confirm user signup with verification code
-    
-    Body:
-        email: User's email address
-        confirmation_code: 6-digit verification code
-    
-    Returns:
-        JSON response with confirmation result
-    """
-    try:
-        result = await cognito_auth.confirm_signup(
-            email=request.email,
-            confirmation_code=request.confirmation_code
-        )
-        
-        return JSONResponse(
-            status_code=200,
-            content=result
-        )
-        
-    except AuthError as e:
-        return JSONResponse(
-            status_code=e.status_code,
-            content={"success": False, "message": e.message}
-        )
-    except Exception as e:
-        logger.error(f"Confirm signup error: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": "Internal server error"}
-        )
-
-@app.post("/auth/login")
-async def login(request: LoginRequest):
-    """
-    Authenticate user and return JWT tokens
-    
-    Body:
-        email: User's email address
-        password: User's password
-    
-    Returns:
-        JSON response with access token, refresh token, and user info
-    """
-    try:
-        result = await cognito_auth.login(
-            email=request.email,
-            password=request.password
-        )
-        
-        # Log successful login
-        logger.info(f"User {request.email} logged in successfully")
-        
-        return JSONResponse(
-            status_code=200,
-            content=result
-        )
-        
-    except AuthError as e:
-        logger.warning(f"Login failed for {request.email}: {e.message}")
-        return JSONResponse(
-            status_code=e.status_code,
-            content={"success": False, "message": e.message}
-        )
-    except Exception as e:
-        logger.error(f"Login error: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": "Internal server error"}
-        )
-
-@app.post("/auth/refresh")
-async def refresh_token(request: RefreshTokenRequest):
-    """
-    Refresh access token using refresh token
-    
-    Body:
-        refresh_token: Valid refresh token
-    
-    Returns:
-        JSON response with new access token
-    """
-    try:
-        result = await cognito_auth.refresh_token(request.refresh_token)
-        
-        return JSONResponse(
-            status_code=200,
-            content=result
-        )
-        
-    except AuthError as e:
-        return JSONResponse(
-            status_code=e.status_code,
-            content={"success": False, "message": e.message}
-        )
-    except Exception as e:
-        logger.error(f"Token refresh error: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": "Internal server error"}
-        )
-
-@app.get("/auth/logout")
-async def logout(request: Request):
-    """
-    Logout user using Cognito hosted UI logout
-    Clears session and redirects to Cognito logout URL
-    """
-    try:
-        # Clear the user session
-        session = get_session(request)
-        session.clear()
-        
-        # Redirect to Cognito hosted UI logout
-        logout_url = cognito_auth.get_logout_url()
-        return RedirectResponse(url=logout_url, status_code=302)
-        
-    except Exception as e:
-        logger.error(f"Logout error: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": "Internal server error"}
-        )
-
-@app.get("/auth/me")
-async def get_current_user_info(request: Request):
-    """
-    Get current authenticated user information
-    
-    Returns:
-        JSON response with user information or 401 if not authenticated
-    """
-    try:
-        user = cognito_auth.get_user_from_session(request)
-        if not user:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-            
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "user": {
-                    "sub": user.get("sub"),
-                    "email": user.get("email"),
-                    "username": user.get("username")
-                }
-            }
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Get user error: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": "Internal server error"}
-        )
-
-@app.get("/auth/callback")
-async def auth_callback(
-    request: Request,
-    code: Optional[str] = Query(None),
-    state: Optional[str] = Query(None),
-    error: Optional[str] = Query(None),
-    error_description: Optional[str] = Query(None)
-):
-    """
-    Handle OAuth callback from Cognito hosted UI
-    
-    Query Parameters:
-        code: Authorization code from Cognito (on success)
-        state: State parameter for security validation
-        error: Error code (on failure)
-        error_description: Human-readable error description
-    
-    Returns:
-        Redirect response to dashboard on success, error page on failure
-    """
-    try:
-        # Handle error cases first
-        if error:
-            logger.error(f"OAuth callback error: {error} - {error_description}")
-            return HTMLResponse(
-                content=f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Authentication Error</title>
-                    <style>
-                        body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
-                        .error {{ color: #d32f2f; background: #ffebee; padding: 20px; border-radius: 8px; margin: 20px auto; max-width: 500px; }}
-                        .btn {{ background: #1976d2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin-top: 20px; }}
-                    </style>
-                </head>
-                <body>
-                    <h1>Authentication Failed</h1>
-                    <div class="error">
-                        <strong>Error:</strong> {error}<br>
-                        <strong>Description:</strong> {error_description or 'Authentication failed'}
-                    </div>
-                    <a href="/" class="btn">Try Again</a>
-                </body>
-                </html>
-                """,
-                status_code=400
-            )
-        
-        # Handle successful callback
-        if code:
-            logger.info(f"Callback received code: {code[:20]}...")
-            
-            # Exchange code for tokens
-            tokens = await cognito_auth.exchange_code_for_tokens(code)
-            logger.info(f"Tokens received: {list(tokens.keys())}")
-            
-            # Verify ID token and get user info (ID tokens have the 'aud' claim)
-            id_token = tokens.get("id_token")
-            if not id_token:
-                raise HTTPException(status_code=400, detail="ID token not received from Cognito")
-            
-            user_info = await cognito_auth.verify_token(id_token)
-            logger.info(f"User info verified: {user_info.get('email')}")
-            
-            # Get Redis session
-            session = get_session(request)
-            
-            # Log session before saving
-            logger.info(f"Session before saving: {dict(session.data)}")
-            
-            # Store user in session
-            user_session_data = {
-                "sub": user_info["sub"],
-                "email": user_info.get("email"),
-                "username": user_info.get("username"),
-                "access_token": tokens["access_token"],
-                "id_token": tokens.get("id_token"),
-                "refresh_token": tokens.get("refresh_token")
-            }
-            session["user"] = user_session_data
-            
-            # Log session after saving
-            logger.info(f"Session after saving: {dict(session.data)}")
-            logger.info(f"User data saved to session: {user_session_data['email']}")
-            
-            logger.info(f"User {user_info.get('email')} authenticated successfully")
-            
-            # Add a small delay to ensure session is saved
-            import asyncio
-            await asyncio.sleep(0.1)
-            
-            # Redirect to dashboard
-            return RedirectResponse(url="/static/index.html", status_code=302)
-        
-        # No code or error provided
-        return HTMLResponse(
-            content="""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Invalid Callback</title>
-                <style>
-                    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-                    .error { color: #d32f2f; background: #ffebee; padding: 20px; border-radius: 8px; margin: 20px auto; max-width: 500px; }
-                    .btn { background: #1976d2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin-top: 20px; }
-                </style>
-            </head>
-            <body>
-                <h1>Invalid Authentication Request</h1>
-                <div class="error">
-                    <p>The authentication callback is missing required parameters.</p>
-                </div>
-                <a href="/" class="btn">Start Authentication</a>
-            </body>
-            </html>
-            """,
-            status_code=400
-        )
-        
-    except Exception as e:
-        logger.error(f"Callback processing error: {str(e)}")
-        return HTMLResponse(
-            content=f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Authentication Error</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
-                    .error {{ color: #d32f2f; background: #ffebee; padding: 20px; border-radius: 8px; margin: 20px auto; max-width: 500px; }}
-                    .btn {{ background: #1976d2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin-top: 20px; }}
-                </style>
-            </head>
-            <body>
-                <h1>Authentication Error</h1>
-                <div class="error">
-                    <p>Error processing authentication: {str(e)}</p>
-                </div>
-                <a href="/" class="btn">Try Again</a>
-            </body>
-            </html>
-            """,
-            status_code=500
-        )
-
-@app.get("/auth/login-url")
-async def get_login_url(redirect_uri: str = "http://localhost:8000/auth/callback", state: Optional[str] = None):
-    """
-    Generate Cognito hosted UI login URL
-    
-    Query Parameters:
-        redirect_uri: Where to redirect after authentication (default: /auth/callback)
-        state: Optional state parameter for security
-    
-    Returns:
-        JSON response with the Cognito hosted UI URL
-    """
-    try:
-        auth_url = cognito_auth.generate_auth_url(redirect_uri, state)
-        
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "auth_url": auth_url,
-                "redirect_uri": redirect_uri,
-                "state": state
-            }
-        )
-        
-    except Exception as e:
-        logger.error(f"Auth URL generation error: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": "Internal server error"}
-        )
-
-@app.get("/auth/login")
-async def auth_login_redirect(request: Request, state: str = "default"):
-    """
-    Redirect to Cognito hosted UI login
-    """
-    login_url = cognito_auth.get_login_url(state)
-    return RedirectResponse(url=login_url)
+# Authentication routes temporarily removed for testing - all auth endpoints disabled
 
 # =============================================================================
-# END AUTHENTICATION ROUTES
+# END AUTHENTICATION ROUTES (REMOVED FOR TESTING)
 # =============================================================================
 
 # --- HTML Endpoints ---
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
     """
-    Serves the dashboard with Cognito hosted UI authentication.
-    Redirects to Cognito login if not authenticated.
+    Serves the dashboard - AUTHENTICATION TEMPORARILY BYPASSED FOR TESTING.
     """
-    # Get Redis session
-    session = get_session(request)
+    # AUTHENTICATION TEMPORARILY DISABLED FOR TESTING
+    logger.info("Authentication bypassed for testing - serving dashboard directly")
     
-    # Debug logging
-    session_data = dict(session.data)
-    user_data = session.get("user")
-    is_auth = user_data is not None
-    
-    logger.info(f"Dashboard access attempt - Session data: {session_data}")
-    logger.info(f"Dashboard access attempt - User data: {user_data}")
-    logger.info(f"Dashboard access attempt - Is authenticated: {is_auth}")
-    
-    # Check if user is authenticated
-    if not is_auth:
-        logger.info("User not authenticated, redirecting to Cognito login")
-        # Redirect to Cognito hosted UI login
-        login_url = cognito_auth.get_login_url()
-        return RedirectResponse(url=login_url, status_code=302)
-    
-    logger.info("User authenticated, serving dashboard")
-    # User is authenticated, redirect to the static dashboard
+    # Directly redirect to the static dashboard without authentication
     return RedirectResponse(url="/static/index.html", status_code=302)
-
-@app.get("/debug/session")
-async def debug_session(request: Request):
-    """Debug endpoint to check session state"""
-    session = get_session(request)
-    session_data = dict(session.data)
-    user_data = session.get("user")
-    is_auth = user_data is not None
     
-    return {
-        "session_exists": bool(session),
-        "session_data": session_data,
-        "user_data": user_data,
-        "is_authenticated": is_auth,
-        "session_keys": list(session.data.keys()) if session else []
-    }
+    # ORIGINAL AUTHENTICATION CODE - COMMENTED OUT FOR TESTING
+    # # Get Redis session
+    # session = get_session(request)
+    # 
+    # # Debug logging
+    # session_data = dict(session.data)
+    # user_data = session.get("user")
+    # is_auth = user_data is not None
+    # 
+    # logger.info(f"Dashboard access attempt - Session data: {session_data}")
+    # logger.info(f"Dashboard access attempt - User data: {user_data}")
+    # logger.info(f"Dashboard access attempt - Is authenticated: {is_auth}")
+    # 
+    # # Check if user is authenticated
+    # if not is_auth:
+    #     logger.info("User not authenticated, redirecting to Cognito login")
+    #     # Redirect to Cognito hosted UI login
+    #     login_url = cognito_auth.get_login_url()
+    #     return RedirectResponse(url=login_url, status_code=302)
+    # 
+    # logger.info("User authenticated, serving dashboard")
+    # # User is authenticated, redirect to the static dashboard
+    # return RedirectResponse(url="/static/index.html", status_code=302)
+
+# DEBUG SESSION ENDPOINT - TEMPORARILY COMMENTED OUT FOR TESTING
+# @app.get("/debug/session")
+# async def debug_session(request: Request):
+#     """Debug endpoint to check session state"""
+#     session = get_session(request)
+#     session_data = dict(session.data)
+#     user_data = session.get("user")
+#     is_auth = user_data is not None
+#     
+#     return {
+#         "session_exists": bool(session),
+#         "session_data": session_data,
+#         "user_data": user_data,
+#         "is_authenticated": is_auth,
+#         "session_keys": list(session.data.keys()) if session else []
+#     }
 
 @app.get("/original", response_class=HTMLResponse)
 async def get_original_dashboard(request: Request):
@@ -1105,6 +724,17 @@ async def handle_passthru(request: Request):
     # IMPORTANT: Always return "OK" for Exotel to proceed with the call flow.
     logger.websocket.info("✅ Passthru: Responding 'OK' to Exotel.")
     return "OK"
+
+# --- Test Passthru Handler ---
+@app.get("/test-passthru")
+async def test_passthru_handler():
+    """Test the passthru handler with sample data"""
+    return {
+        "status": "success",
+        "message": "Passthru handler is working",
+        "passthru_url": "https://4ee3feb8d5e0.ngrok-free.app/passthru-handler",
+        "instructions": "Add this URL to your Exotel Flow Passthru applet"
+    }
 
 # --- WebSocket Endpoint for Voicebot ---
 async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_call_id: str = None, call_sid: str = None, phone: str = None):
@@ -1591,12 +1221,12 @@ class CustomerData(BaseModel):
     language_code: str
 
 @app.post("/api/upload-customers")
-async def upload_customers(file: UploadFile = File(...), current_user: dict = Depends(get_current_user_optional)):
+async def upload_customers(file: UploadFile = File(...)):  # REMOVED AUTH FOR TESTING: current_user: dict = Depends(get_current_user_optional)
     """
     Accepts a CSV or Excel file, processes it, and stores customer data in the database.
     Authentication optional for development.
     """
-    user_email = current_user.get('email', 'anonymous') if current_user else 'anonymous'
+    user_email = 'testing-mode'  # REMOVED AUTH FOR TESTING: current_user.get('email', 'anonymous') if current_user else 'anonymous'
     print(f"📁 [CHECKPOINT] /api/upload-customers endpoint hit by user: {user_email}")
     print(f"📁 [CHECKPOINT] File name: {file.filename}")
     print(f"📁 [CHECKPOINT] File content type: {file.content_type}")
@@ -1620,12 +1250,12 @@ async def upload_customers(file: UploadFile = File(...), current_user: dict = De
         return {"success": False, "error": str(e)}
 
 @app.post("/api/trigger-single-call")
-async def trigger_single_call(customer_id: str = Body(..., embed=True), current_user: dict = Depends(get_current_user)):
+async def trigger_single_call(customer_id: str = Body(..., embed=True)):  # REMOVED AUTH FOR TESTING: current_user: dict = Depends(get_current_user)
     """
     Triggers a single call to a customer by their ID.
     Requires authentication.
     """
-    print(f"🚀 [CHECKPOINT] /api/trigger-single-call endpoint hit by user: {current_user.get('email', 'unknown')}")
+    print(f"🚀 [CHECKPOINT] /api/trigger-single-call endpoint hit by user: testing-mode")
     print(f"🚀 [CHECKPOINT] Customer ID: {customer_id}")
     
     try:
@@ -1633,21 +1263,21 @@ async def trigger_single_call(customer_id: str = Body(..., embed=True), current_
         print(f"🚀 [CHECKPOINT] Call service result: {result}")
         
         # Log the action with user information
-        logger.info(f"User {current_user.get('email')} triggered single call for customer: {customer_id}")
+        logger.info(f"User testing-mode triggered single call for customer: {customer_id}")
         
         return result
     except Exception as e:
         print(f"❌ [CHECKPOINT] Exception in trigger_single_call endpoint: {e}")
-        logger.error(f"Trigger single call error for user {current_user.get('email')}: {str(e)}")
+        logger.error(f"Trigger single call error for user testing-mode: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @app.post("/api/trigger-bulk-calls")
-async def trigger_bulk_calls(customer_ids: list[str] = Body(..., embed=True), current_user: dict = Depends(get_current_user)):
+async def trigger_bulk_calls(customer_ids: list[str] = Body(..., embed=True)):  # REMOVED AUTH FOR TESTING: current_user: dict = Depends(get_current_user)
     """
     Triggers calls to a list of customers by their IDs.
     Requires authentication.
     """
-    print(f"🚀 [CHECKPOINT] /api/trigger-bulk-calls endpoint hit by user: {current_user.get('email', 'unknown')}")
+    print(f"🚀 [CHECKPOINT] /api/trigger-bulk-calls endpoint hit by user: testing-mode")
     print(f"🚀 [CHECKPOINT] Customer IDs: {customer_ids}")
     print(f"🚀 [CHECKPOINT] Number of customers: {len(customer_ids)}")
     
@@ -1656,12 +1286,12 @@ async def trigger_bulk_calls(customer_ids: list[str] = Body(..., embed=True), cu
         print(f"🚀 [CHECKPOINT] Bulk call service result: {result}")
         
         # Log the action with user information
-        logger.info(f"User {current_user.get('email')} triggered bulk calls for {len(customer_ids)} customers")
+        logger.info(f"User testing-mode triggered bulk calls for {len(customer_ids)} customers")
         
         return result
     except Exception as e:
         print(f"❌ [CHECKPOINT] Exception in trigger_bulk_calls endpoint: {e}")
-        logger.error(f"Trigger bulk calls error for user {current_user.get('email')}: {str(e)}")
+        logger.error(f"Trigger bulk calls error for user testing-mode: {str(e)}")
         return {"success": False, "error": str(e)}
 
 def safe_float_conversion(value):
@@ -1689,12 +1319,12 @@ def safe_float_conversion(value):
         return 0
 
 @app.get("/api/customers")
-async def get_all_customers(current_user: dict = Depends(get_current_user_optional)):
+async def get_all_customers():  # REMOVED AUTH FOR TESTING: current_user: dict = Depends(get_current_user_optional)
     """
     Retrieves all customers from the database with loans relationship.
     Authentication optional for development.
     """
-    user_email = current_user.get('email', 'anonymous') if current_user else 'anonymous'
+    user_email = 'testing-mode'  # REMOVED AUTH FOR TESTING
     print(f"👥 [CHECKPOINT] /api/customers endpoint hit by user: {user_email}")
     
     session = db_manager.get_session()
@@ -1791,7 +1421,7 @@ async def get_all_customers(current_user: dict = Depends(get_current_user_option
         session.close()
 
 @app.get("/api/uploaded-files")
-async def get_uploaded_files(current_user: dict = Depends(get_current_user_optional)):
+async def get_uploaded_files():  # REMOVED AUTH FOR TESTING: current_user: dict = Depends(get_current_user_optional)
     """
     Get list of uploaded files/batches
     """
@@ -1822,7 +1452,7 @@ async def get_uploaded_files(current_user: dict = Depends(get_current_user_optio
         session.close()
 
 @app.get("/api/uploaded-files/ids")
-async def get_uploaded_file_ids(current_user: dict = Depends(get_current_user_optional)):
+async def get_uploaded_file_ids():  # REMOVED AUTH FOR TESTING: current_user: dict = Depends(get_current_user_optional)
     """
     Get list of uploaded file IDs for batch selection
     """
@@ -1849,7 +1479,7 @@ async def get_uploaded_file_ids(current_user: dict = Depends(get_current_user_op
         session.close()
 
 @app.get("/api/uploaded-files/{batch_id}/details")
-async def get_batch_details(batch_id: str, current_user: dict = Depends(get_current_user_optional)):
+async def get_batch_details(batch_id: str):  # REMOVED AUTH FOR TESTING: current_user: dict = Depends(get_current_user_optional)
     """
     Get detailed information about a specific batch
     """
