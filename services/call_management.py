@@ -26,6 +26,7 @@ from database.schemas import (
 from utils.redis_session import redis_manager
 from utils.handler_asr import SarvamHandler
 from utils.logger import logger
+from utils.json_encoder import convert_to_json_serializable
 
 load_dotenv()
 
@@ -180,7 +181,7 @@ class CallManagementService:
                     failed_records += 1
                     processing_errors.append({
                         'row': idx + 1,
-                        'customer_data': customer_data,
+                        'customer_data': convert_to_json_serializable(customer_data),
                         'error': str(e)
                     })
                     logger.error(f"Failed to process customer at row {idx + 1}: {e}", exc_info=True)

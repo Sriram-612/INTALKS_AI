@@ -654,6 +654,34 @@ async def generate_websocket_url(request: Request):
     # Return the WebSocket URL as plain text for Exotel to use
     return websocket_url
 
+# --- WebSocket URL Endpoint ---
+@app.get("/websocket-url")
+async def get_websocket_url():
+    """
+    Returns the WebSocket URL configuration for Exotel Flow Stream/Voicebot applet.
+    This provides the correct WebSocket endpoint that Exotel should connect to.
+    """
+    # Get the base URL (ngrok URL)
+    base_url = os.getenv('BASE_URL', 'http://localhost:8000')
+    # Convert http to ws
+    ws_base_url = base_url.replace('http://', 'ws://').replace('https://', 'wss://')
+    
+    # The main WebSocket endpoint for voice templates
+    websocket_endpoint = f"{ws_base_url}/ws/voicebot/{{session_id}}"
+    
+    return {
+        "websocket_url": websocket_endpoint,
+        "endpoint_pattern": "/ws/voicebot/{session_id}",
+        "example_url": f"{ws_base_url}/ws/voicebot/example_session_123",
+        "protocol": "wss" if base_url.startswith('https') else "ws",
+        "note": "Replace {session_id} with actual CallSid or unique session identifier",
+        "exotel_flow_config": {
+            "applet_type": "Stream/Voicebot", 
+            "websocket_url": websocket_endpoint,
+            "description": "Add this URL to your Exotel Flow after the Passthru applet"
+        }
+    }
+
 # --- Exotel Passthru Handler ---
 @app.get("/passthru-handler", response_class=PlainTextResponse)
 async def handle_passthru(request: Request):
@@ -1748,7 +1776,7 @@ async def old_websocket_endpoint(websocket: WebSocket):
                 
                 # 4. Validate customer data has required fields (allow placeholder values)
                 required_fields = ['name', 'loan_id', 'amount', 'due_date']
-                missing_fields = [field for field in required_fields if not customer_info.get(field)]
+                missing_fields = [field for field in required_fields if not customer_info.get(field) or customer_info.get(field) in ['None', 'null', 'undefined']]
                 if missing_fields:
                     logger.database.error(f"❌ Customer data missing required fields: {missing_fields}")
                     logger.log_call_event("CUSTOMER_DATA_INCOMPLETE", call_sid, customer_info['name'] if customer_info else 'Unknown', {"missing_fields": missing_fields})
@@ -1757,16 +1785,14 @@ async def old_websocket_endpoint(websocket: WebSocket):
                         "message": f"Customer data incomplete. Missing fields: {', '.join(missing_fields)}"
                     }))
                     return
-                
+
                 # Convert placeholder values to generic terms for speech
-                if customer_info.get('loan_id') in ['Unknown', 'N/A', None]:
+                if customer_info.get('loan_id') in ['Unknown', 'N/A', None, 'None', 'null']:
                     customer_info['loan_id'] = '1234'  # Generic loan ID for speech
-                if customer_info.get('amount') in ['Unknown', 'N/A', '₹0', None]:
+                if customer_info.get('amount') in ['Unknown', 'N/A', '₹0', None, 'None', 'null']:
                     customer_info['amount'] = '5000'  # Generic amount for speech
-                if customer_info.get('due_date') in ['Unknown', 'N/A', None]:
-                    customer_info['due_date'] = 'this month'  # Generic due date for speech
-                
-                print(f"[Compatibility] ✅ Customer data validated: {customer_info['name']} - Loan: {customer_info['loan_id']}, Amount: ₹{customer_info['amount']}")
+                if customer_info.get('due_date') in ['Unknown', 'N/A', None, 'None', 'null']:
+                    customer_info['due_date'] = 'this month'  # Generic due date for speech                print(f"[Compatibility] ✅ Customer data validated: {customer_info['name']} - Loan: {customer_info['loan_id']}, Amount: ₹{customer_info['amount']}")
                 
                 # Initialize language variables for enhanced language detection
                 csv_language = customer_info.get('lang', 'en-IN')
