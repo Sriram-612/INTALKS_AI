@@ -1,0 +1,2 @@
+name,phone,loan_id,amount,due_date,state,Cluster,Branch,employee_id,product_type,status
+Test Customer Today,9876543999,LN999,75000,2025-09-30,Maharashtra,West,Mumbai,EMP002,Home Loan,active

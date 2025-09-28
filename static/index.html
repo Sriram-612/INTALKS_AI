@@ -2031,12 +2031,87 @@
                 const responseData = await response.json();
                 console.log('📊 Batch details data:', responseData);
                 
-                if (!responseData.success) {
-                    throw new Error(responseData.error || 'Failed to load batch data');
-                }
+                // Handle simple array response format from API
+                let batches = [];
+                let pagination = {};
                 
-                const batches = responseData.uploads || [];
-                const pagination = responseData.pagination || {};
+                if (Array.isArray(responseData)) {
+                    // Direct array response - apply client-side pagination
+                    const allBatches = responseData;
+                    
+                    // Apply date filter with IST timezone support
+                    let filteredBatches = allBatches;
+                    if (batchDateFilter && batchDateFilter !== 'all') {
+                        // Get current IST date for comparison
+                        const nowIST = new Date().toLocaleString('en-US', {timeZone: 'Asia/Kolkata'});
+                        const today = new Date(nowIST);
+                        const todayStr = today.toDateString();
+                        const yesterdayStr = new Date(today.getTime() - 86400000).toDateString();
+                        
+                        console.log('📊 Date filter debug:', {
+                            filter: batchDateFilter,
+                            todayIST: todayStr,
+                            yesterdayIST: yesterdayStr
+                        });
+                        
+                        filteredBatches = allBatches.filter(batch => {
+                            // Convert batch date to IST for comparison
+                            const batchDateUTC = new Date(batch.uploaded_at);
+                            const batchDateIST = new Date(batchDateUTC.toLocaleString('en-US', {timeZone: 'Asia/Kolkata'}));
+                            const batchDateStr = batchDateIST.toDateString();
+                            
+                            console.log('📊 Batch date comparison:', {
+                                filename: batch.filename,
+                                originalDate: batch.uploaded_at,
+                                batchDateIST: batchDateStr,
+                                todayIST: todayStr,
+                                matches: batchDateStr === todayStr
+                            });
+                            
+                            switch (batchDateFilter) {
+                                case 'today': return batchDateStr === todayStr;
+                                case 'yesterday': return batchDateStr === yesterdayStr;
+                                case 'week': 
+                                    const weekAgo = new Date(today.getTime() - 7 * 86400000);
+                                    return batchDateIST >= weekAgo;
+                                case 'month':
+                                    const monthAgo = new Date(today.getTime() - 30 * 86400000);
+                                    return batchDateIST >= monthAgo;
+                                default: return true;
+                            }
+                        });
+                        
+                        console.log('📊 Filtered batches:', {
+                            total: allBatches.length,
+                            filtered: filteredBatches.length,
+                            filter: batchDateFilter
+                        });
+                    }
+                    
+                    // Apply pagination
+                    const totalCount = filteredBatches.length;
+                    const pageSize = batchPageSize === 'all' ? totalCount : parseInt(batchPageSize);
+                    const totalPages = Math.ceil(totalCount / pageSize);
+                    const startIndex = (batchCurrentPage - 1) * pageSize;
+                    const endIndex = startIndex + pageSize;
+                    
+                    batches = filteredBatches.slice(startIndex, endIndex);
+                    pagination = {
+                        current_page: batchCurrentPage,
+                        page_size: pageSize,
+                        total_count: totalCount,
+                        total_pages: totalPages,
+                        has_prev: batchCurrentPage > 1,
+                        has_next: batchCurrentPage < totalPages
+                    };
+                } else {
+                    // Structured response format
+                    if (!responseData.success) {
+                        throw new Error(responseData.error || 'Failed to load batch data');
+                    }
+                    batches = responseData.uploads || [];
+                    pagination = responseData.pagination || {};
+                }
                 
                 // Update batch statistics
                 updateBatchStatistics(batches, pagination);
@@ -2878,7 +2953,7 @@
             if (!primaryDate) return { class: 'date-older', text: 'Unknown' };
             
             try {
-                // Parse the date (treat as IST since our system is IST)
+                // Parse the date (incoming from server in IST)
                 const uploadDate = new Date(primaryDate);
                 
                 // Validate date object
@@ -2886,12 +2961,25 @@
                     return { class: 'date-older', text: 'Invalid Date' };
                 }
                 
-                // Get current IST date
+                // Convert current time to IST to match server timezone
                 const now = new Date();
+                const istOffset = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
+                const utc = now.getTime() + (now.getTimezoneOffset() * 60 * 1000);
+                const istNow = new Date(utc + istOffset);
                 
-                // Get date strings for simple comparison
-                const todayStr = now.toDateString();
+                // Get date strings for simple comparison (both in IST now)
+                const todayStr = istNow.toDateString();
                 const uploadStr = uploadDate.toDateString();
+                
+                // Debug logging to see what's happening
+                console.log('Date comparison debug:', {
+                    primaryDate,
+                    uploadStr,
+                    todayStr,
+                    uploadDate: uploadDate.toISOString(),
+                    istNow: istNow.toISOString(),
+                    browserTime: now.toISOString()
+                });
                 
                 // Today check
                 if (uploadStr === todayStr) {
@@ -2899,15 +2987,20 @@
                 }
                 
                 // Yesterday check
-                const yesterday = new Date(now);
-                yesterday.setDate(yesterday.getDate() - 1);
+                const yesterday = new Date(istNow);
+                yesterday.setDate(istNow.getDate() - 1);
                 
                 if (uploadStr === yesterday.toDateString()) {
                     return { class: 'date-yesterday', text: 'Yesterday' };
                 }
                 
-                // Calculate days difference
-                const timeDiff = now.setHours(0,0,0,0) - uploadDate.setHours(0,0,0,0);
+                // Calculate days difference using IST dates
+                const istNowDate = new Date(istNow);
+                istNowDate.setHours(0,0,0,0);
+                const uploadDateOnly = new Date(uploadDate);
+                uploadDateOnly.setHours(0,0,0,0);
+                
+                const timeDiff = istNowDate.getTime() - uploadDateOnly.getTime();
                 const daysDiff = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
                 
                 if (daysDiff <= 7 && daysDiff > 0) {
@@ -3122,9 +3215,31 @@
                 const result = await response.json();
                 
                 if (result.success) {
-                    const successMessage = `Upload successful: ${result.processing_results.success_records} records processed`;
+                    // Enhanced upload tracking with detailed statistics
+                    const stats = result.processing_results;
+                    const totalRecords = stats.total_records || 0;
+                    const successRecords = stats.success_records || 0;
+                    const failedRecords = stats.failed_records || 0;
+                    const newRecords = stats.new_customers || 0;
+                    const updatedRecords = stats.updated_customers || 0;
+                    
+                    const successMessage = `Upload completed: ${successRecords}/${totalRecords} records processed successfully`;
                     logActivity(`✅ ${successMessage}`);
+                    
+                    // Show detailed upload statistics
+                    let detailMessage = `📊 Upload Statistics:\n`;
+                    detailMessage += `• Total Records: ${totalRecords}\n`;
+                    detailMessage += `• Successfully Processed: ${successRecords}\n`;
+                    if (newRecords > 0) detailMessage += `• New Customers: ${newRecords}\n`;
+                    if (updatedRecords > 0) detailMessage += `• Updated Customers: ${updatedRecords}\n`;
+                    if (failedRecords > 0) detailMessage += `• Failed Records: ${failedRecords}\n`;
+                    
+                    logActivity(detailMessage);
                     showToast(successMessage, 'success');
+                    
+                    // Show upload tracking info to prevent duplicate file uploads
+                    const uploadId = result.upload_id || 'unknown';
+                    logActivity(`📂 File Upload ID: ${uploadId} - Use this to track your upload`);
                     
                     // Refresh customer data from database after successful upload
                     setTimeout(() => {
