@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Timezone Function Test</title>
+</head>
+<body>
+    <h2>Timezone Function Test</h2>
+    <div id="output"></div>
+
+    <script>
+        // Copy our timezone functions from the dashboard
+        function formatDateIST(utcDateString, options = {}) {
+            if (!utcDateString) return 'N/A';
+            
+            try {
+                // Parse UTC date and convert to IST
+                const utcDate = new Date(utcDateString);
+                
+                // Default options for IST display
+                const defaultOptions = {
+                    timeZone: 'Asia/Kolkata',
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    ...options
+                };
+                
+                const istTime = utcDate.toLocaleString('en-IN', defaultOptions);
+                return `${istTime} IST`;
+            } catch (error) {
+                console.warn('Error formatting date:', error);
+                return utcDateString;
+            }
+        }
+
+        function formatTimeIST(utcDateString) {
+            return formatDateIST(utcDateString, {
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+
+        function formatDateOnlyIST(utcDateString) {
+            return formatDateIST(utcDateString, {
+                hour: undefined,
+                minute: undefined,
+                second: undefined
+            }).replace(' IST', '');
+        }
+
+        // Test the functions
+        const testOutput = document.getElementById('output');
+        const now = new Date();
+        const utcString = now.toISOString();
+        
+        testOutput.innerHTML = `
+            <h3>Test Results:</h3>
+            <p><strong>Current UTC Time:</strong> ${utcString}</p>
+            <p><strong>Full IST Format:</strong> ${formatDateIST(utcString)}</p>
+            <p><strong>Time Only IST:</strong> ${formatTimeIST(utcString)}</p>
+            <p><strong>Date Only IST:</strong> ${formatDateOnlyIST(utcString)}</p>
+            
+            <hr>
+            <h3>Testing with Sample Database Timestamps:</h3>
+            <p><strong>Sample 1:</strong> ${formatDateIST('2025-09-27T21:58:36.830525')}</p>
+            <p><strong>Sample 2:</strong> ${formatTimeIST('2025-09-27T15:30:00.000000')}</p>
+            <p><strong>Sample 3:</strong> ${formatDateOnlyIST('2025-09-27T09:15:45.123456')}</p>
+        `;
+    </script>
+</body>
+</html>

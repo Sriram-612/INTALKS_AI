@@ -1490,6 +1490,48 @@
         const AUTO_REFRESH_INTERVAL = 30000; // 30 seconds
         const DATA_REFRESH_INTERVAL = 60000;  // 1 minute for full data refresh
 
+        // Simple IST date formatting functions
+        function formatDateIST(dateString, options = {}) {
+            if (!dateString) return 'N/A';
+            
+            try {
+                const date = new Date(dateString);
+                
+                const defaultOptions = {
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    ...options
+                };
+                
+                return date.toLocaleString('en-IN', defaultOptions) + ' IST';
+            } catch (error) {
+                console.warn('Error formatting date:', error);
+                return dateString;
+            }
+        }
+
+        function formatTimeIST(dateString) {
+            return formatDateIST(dateString, {
+                year: undefined,
+                month: undefined,
+                day: undefined
+            }).replace(' IST', '') + ' IST';
+        }
+
+        function formatDateOnlyIST(dateString) {
+            if (!dateString) return 'N/A';
+            try {
+                const date = new Date(dateString);
+                return date.toLocaleDateString('en-IN');
+            } catch (error) {
+                return dateString;
+            }
+        }
+
         // Initialize dashboard
         document.addEventListener('DOMContentLoaded', function() {
             console.log('🚀 Dashboard initializing...');
@@ -2232,7 +2274,7 @@
                     <h3>📄 Batch Upload Details</h3>
                     <div class="batch-detail-info">
                         <div><strong>File:</strong> ${upload.original_filename || upload.filename}</div>
-                        <div><strong>Uploaded:</strong> ${new Date(upload.uploaded_at).toLocaleString('en-IN')}</div>
+                        <div><strong>Uploaded:</strong> ${formatDateIST(upload.uploaded_at)}</div>
                         <div><strong>Status:</strong> <span class="batch-status ${upload.status.toLowerCase()}">${upload.status}</span></div>
                         <div><strong>Total Records:</strong> ${upload.total_records}</div>
                         <div><strong>Success:</strong> ${upload.success_records}</div>
@@ -2395,8 +2437,7 @@
             );
             
             const statusRows = sortedStatuses.slice(0, 50).map(status => {
-                const timestamp = new Date(status.timestamp);
-                const formattedTime = timestamp.toLocaleString('en-IN', {
+                const formattedTime = formatDateIST(status.timestamp, {
                     day: '2-digit',
                     month: 'short',
                     hour: '2-digit',
@@ -2478,8 +2519,7 @@
                         <h4>Status Updates:</h4>
                         <div class="status-timeline">
                             ${callData.statuses.map(status => {
-                                const timestamp = new Date(status.timestamp);
-                                const formattedTime = timestamp.toLocaleString('en-IN');
+                                const formattedTime = formatDateIST(status.timestamp);
                                 const statusClass = status.status.toLowerCase().replace(/_/g, '_');
                                 
                                 return `
@@ -2832,56 +2872,57 @@
             updateDisplayInfo();
         }
 
-        // Get upload date badge with IST timezone support and enhanced fallback logic
+        // Get upload date badge - simplified IST only logic
         function getUploadDateBadge(dateString, fallbackDate) {
-            // Try primary date first, then fallback date, then return unknown
             const primaryDate = dateString || fallbackDate;
             if (!primaryDate) return { class: 'date-older', text: 'Unknown' };
             
-            const date = new Date(primaryDate);
-            
-            // Validate date object
-            if (isNaN(date.getTime())) {
-                return { class: 'date-older', text: 'Invalid Date' };
+            try {
+                // Parse the date (treat as IST since our system is IST)
+                const uploadDate = new Date(primaryDate);
+                
+                // Validate date object
+                if (isNaN(uploadDate.getTime())) {
+                    return { class: 'date-older', text: 'Invalid Date' };
+                }
+                
+                // Get current IST date
+                const now = new Date();
+                
+                // Get date strings for simple comparison
+                const todayStr = now.toDateString();
+                const uploadStr = uploadDate.toDateString();
+                
+                // Today check
+                if (uploadStr === todayStr) {
+                    return { class: 'date-today', text: 'Today' };
+                }
+                
+                // Yesterday check
+                const yesterday = new Date(now);
+                yesterday.setDate(yesterday.getDate() - 1);
+                
+                if (uploadStr === yesterday.toDateString()) {
+                    return { class: 'date-yesterday', text: 'Yesterday' };
+                }
+                
+                // Calculate days difference
+                const timeDiff = now.setHours(0,0,0,0) - uploadDate.setHours(0,0,0,0);
+                const daysDiff = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
+                
+                if (daysDiff <= 7 && daysDiff > 0) {
+                    return { class: 'date-week', text: `${daysDiff}d ago` };
+                } else if (daysDiff < 0) {
+                    // Future date
+                    return { class: 'date-future', text: 'Future' };
+                }
+                
+                return { class: 'date-older', text: `${daysDiff}d ago` };
+                
+            } catch (error) {
+                console.error('Error in getUploadDateBadge:', error, primaryDate);
+                return { class: 'date-older', text: 'Date Error' };
             }
-            
-            // Get current date in IST
-            const now = new Date();
-            const istNow = new Date(now.toLocaleString('en-US', {timeZone: 'Asia/Kolkata'}));
-            
-            // Convert upload date to IST
-            const istDate = new Date(date.toLocaleString('en-US', {timeZone: 'Asia/Kolkata'}));
-            
-            // Get only the date part (ignore time)
-            const todayDateString = istNow.toDateString();
-            const uploadDateString = istDate.toDateString();
-            
-            // Compare dates
-            if (uploadDateString === todayDateString) {
-                return { class: 'date-today', text: 'Today' };
-            }
-            
-            // Check for yesterday
-            const yesterday = new Date(istNow);
-            yesterday.setDate(yesterday.getDate() - 1);
-            const yesterdayDateString = yesterday.toDateString();
-            
-            if (uploadDateString === yesterdayDateString) {
-                return { class: 'date-yesterday', text: 'Yesterday' };
-            }
-            
-            // Calculate days difference more accurately
-            const timeDiff = istNow.setHours(0,0,0,0) - istDate.setHours(0,0,0,0);
-            const daysDiff = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
-            
-            if (daysDiff <= 7 && daysDiff > 0) {
-                return { class: 'date-week', text: `${daysDiff}d ago` };
-            } else if (daysDiff < 0) {
-                // Future date
-                return { class: 'date-future', text: 'Future' };
-            }
-            
-            return { class: 'date-older', text: `${daysDiff}d ago` };
         }
 
         // Format currency
@@ -2889,56 +2930,33 @@
             return new Intl.NumberFormat('en-IN').format(amount);
         }
 
-        // Format date with IST timezone and enhanced error handling
+        // Format date - simple IST formatting
         function formatDate(dateString) {
             if (!dateString) return null;
             
-            const date = new Date(dateString);
-            
-            // Check if date is valid
-            if (isNaN(date.getTime())) {
-                console.warn('Invalid date string provided to formatDate:', dateString);
-                return 'Invalid Date';
-            }
-            
             try {
-                return date.toLocaleDateString('en-IN', {
-                    timeZone: 'Asia/Kolkata',
-                    day: '2-digit',
-                    month: '2-digit',
-                    year: 'numeric'
-                });
+                return formatDateOnlyIST(dateString);
             } catch (error) {
                 console.error('Error formatting date:', error, dateString);
                 return 'Date Error';
             }
         }
 
-        // Format date and time with IST timezone
+        // Format date and time - simple IST formatting
         function formatDateTime(dateString) {
             if (!dateString) return null;
-            const date = new Date(dateString);
-            return date.toLocaleString('en-IN', {
-                timeZone: 'Asia/Kolkata',
-                day: '2-digit',
-                month: '2-digit', 
-                year: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: true
-            });
+            try {
+                return formatDateIST(dateString);
+            } catch (error) {
+                console.error('Error formatting datetime:', error, dateString);
+                return 'DateTime Error';
+            }
         }
 
         // Get IST current time
         function getCurrentISTTime() {
-            return new Date().toLocaleString('en-IN', {
-                timeZone: 'Asia/Kolkata',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: true
-            });
+            const now = new Date();
+            return now.toLocaleTimeString('en-IN') + ' IST';
         }
 
         // Select all filtered customers

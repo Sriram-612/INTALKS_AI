@@ -71,7 +71,8 @@ class CallManagementService:
             processed_customers = []
             failed_records = 0
             processing_errors = []
-            current_upload_date = datetime.utcnow().date()
+            # Store upload date in IST 
+            current_upload_date = datetime.now().date()
             
             for idx, customer_data in enumerate(customers_data):
                 try:
@@ -80,42 +81,34 @@ class CallManagementService:
                     if not phone_number:
                         raise ValueError("Phone number is required")
                     
-                    # Check if customer already exists
+                    # Always CREATE new customer entry for each upload (allows multiple entries per customer)
+                    # This enables tracking the same customer across different upload dates
                     existing_any_date = get_customer_by_phone(session, phone_number)
                     
                     if existing_any_date:
-                        # Customer already exists - UPDATE the existing record
-                        customer = existing_any_date
-                        
-                        # Update customer fields with new data
-                        for key, value in customer_data.items():
-                            if hasattr(customer, key) and value is not None and key not in ['id', 'created_at', 'fingerprint']:
-                                setattr(customer, key, value)
-                        
-                        customer.updated_at = datetime.utcnow()
-                        session.commit()
-                        
-                        logger.info(f"✅ Updated existing customer: {customer.full_name} (Phone: {phone_number})")
+                        logger.info(f"📝 Creating NEW entry for returning customer: {customer_data.get('full_name', 'Unknown')} (Phone: {phone_number})")
                     else:
-                        # First-time customer - CREATE new record
-                        
-                        # Ensure fingerprint is generated properly
-                        if not customer_data.get('fingerprint'):
-                            customer_data['fingerprint'] = compute_fingerprint(
-                                phone_number,
-                                customer_data.get('national_id', '')
-                            )
-                        
-                        # Set first upload date
-                        customer_data['first_uploaded_at'] = datetime.utcnow()
-                        
-                        logger.info(f"Processing first-time customer: {customer_data.get('name', 'Unknown')} (Phone: {phone_number})")
-                        
-                        customer = create_customer(session, customer_data)
-                        if not customer:
-                            raise Exception("Failed to create customer record")
-                        
-                        logger.info(f"✅ First-time customer created: {customer.full_name} (Upload Date: {current_upload_date})")
+                        logger.info(f"📝 Creating entry for first-time customer: {customer_data.get('full_name', 'Unknown')} (Phone: {phone_number})")
+                    
+                    # Always CREATE new record for each upload
+                    
+                    # Ensure fingerprint is generated properly
+                    if not customer_data.get('fingerprint'):
+                        customer_data['fingerprint'] = compute_fingerprint(
+                            phone_number,
+                            customer_data.get('national_id', '')
+                        )
+                    
+                    # Set first upload date in IST
+                    customer_data['first_uploaded_at'] = datetime.now()
+                    
+                    logger.info(f"Processing customer: {customer_data.get('name', 'Unknown')} (Phone: {phone_number})")
+                    
+                    customer = create_customer(session, customer_data)
+                    if not customer:
+                        raise Exception("Failed to create customer record")
+                    
+                    logger.info(f"✅ Customer entry created: {customer.full_name} (Upload Date: {current_upload_date})")
                     
                     # Create loan record if loan data exists
                     if customer_data.get('loan_id') and customer.id:

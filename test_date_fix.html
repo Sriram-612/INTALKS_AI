@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Date Badge Fix</title>
+</head>
+<body>
+    <h2>Test Date Badge Fix</h2>
+    <div id="output"></div>
+
+    <script>
+        // Copy the fixed function
+        function getUploadDateBadge(dateString, fallbackDate) {
+            const primaryDate = dateString || fallbackDate;
+            if (!primaryDate) return { class: 'date-older', text: 'Unknown' };
+            
+            try {
+                // Parse the UTC timestamp from database
+                let utcTimestamp = primaryDate;
+                if (!utcTimestamp.endsWith('Z') && !utcTimestamp.includes('+')) {
+                    utcTimestamp += 'Z'; // Ensure it's treated as UTC
+                }
+                
+                const utcDate = new Date(utcTimestamp);
+                
+                // Validate date object
+                if (isNaN(utcDate.getTime())) {
+                    return { class: 'date-older', text: 'Invalid Date' };
+                }
+                
+                // Convert UTC to IST (add 5.5 hours)
+                const istUploadDate = new Date(utcDate.getTime() + (5.5 * 60 * 60 * 1000));
+                
+                // Get current date in IST (our system is already in IST)
+                const now = new Date();
+                
+                // Extract date components for comparison
+                const today = {
+                    year: now.getFullYear(),
+                    month: now.getMonth(),
+                    date: now.getDate()
+                };
+                
+                const upload = {
+                    year: istUploadDate.getFullYear(),
+                    month: istUploadDate.getMonth(),
+                    date: istUploadDate.getDate()
+                };
+                
+                // Debug info
+                console.log('Debug:', {
+                    original: primaryDate,
+                    utcDate: utcDate.toString(),
+                    istUploadDate: istUploadDate.toString(),
+                    today: today,
+                    upload: upload,
+                    match: upload.year === today.year && upload.month === today.month && upload.date === today.date
+                });
+                
+                // Compare dates
+                if (upload.year === today.year && upload.month === today.month && upload.date === today.date) {
+                    return { class: 'date-today', text: 'Today' };
+                }
+                
+                // Check for yesterday
+                const yesterday = new Date(now);
+                yesterday.setDate(yesterday.getDate() - 1);
+                
+                if (upload.year === yesterday.getFullYear() && 
+                    upload.month === yesterday.getMonth() && 
+                    upload.date === yesterday.getDate()) {
+                    return { class: 'date-yesterday', text: 'Yesterday' };
+                }
+                
+                // Calculate days difference
+                const nowDateOnly = new Date(today.year, today.month, today.date);
+                const uploadDateOnly = new Date(upload.year, upload.month, upload.date);
+                const daysDiff = Math.floor((nowDateOnly - uploadDateOnly) / (1000 * 60 * 60 * 24));
+                
+                if (daysDiff <= 7 && daysDiff > 0) {
+                    return { class: 'date-week', text: `${daysDiff}d ago` };
+                } else if (daysDiff < 0) {
+                    return { class: 'date-future', text: 'Future' };
+                }
+                
+                return { class: 'date-older', text: `${daysDiff}d ago` };
+                
+            } catch (error) {
+                console.error('Error in getUploadDateBadge:', error, primaryDate);
+                return { class: 'date-older', text: 'Date Error' };
+            }
+        }
+
+        // Test with actual timestamps from your data
+        const now = new Date();
+        const testTimestamps = [
+            '2025-09-27T21:58:36.830525',  // Should be Today (27th UTC + 5.5 = 28th IST)
+            '2025-09-27T15:30:00.000000',  // Should be Today (27th UTC + 5.5 = 27th/28th IST)
+            '2025-09-26T21:00:00.000000',  // Should be Yesterday
+            '2025-09-25T21:00:00.000000'   // Should be 2d ago
+        ];
+        
+        let output = `
+            <h3>Current Time: ${now.toString()}</h3>
+            <h3>Current IST Date: ${now.getDate()}/${now.getMonth()+1}/${now.getFullYear()}</h3>
+            <h3>Test Results:</h3>
+        `;
+        
+        testTimestamps.forEach((ts, i) => {
+            const result = getUploadDateBadge(ts);
+            output += `
+                <div style="margin: 10px 0; padding: 10px; border: 1px solid #ccc;">
+                    <p><strong>Test ${i+1}:</strong> ${ts}</p>
+                    <p><strong>Result:</strong> <span style="background: ${result.text === 'Today' ? 'lightgreen' : 'yellow'}; padding: 2px 5px;">${result.text}</span></p>
+                </div>
+            `;
+        });
+        
+        document.getElementById('output').innerHTML = output;
+    </script>
+</body>
+</html>

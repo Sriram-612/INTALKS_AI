@@ -159,14 +159,22 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def compute_fingerprint(phone: str, national_id: str = "") -> str:
     """
-    Compute a unique fingerprint for customer deduplication
+    Compute a unique fingerprint for each customer entry
+    Includes timestamp and UUID to ensure uniqueness for multiple uploads
     """
+    import uuid
+    from datetime import datetime
+    
     # Normalize phone number
     normalized_phone = phone.replace("+", "").replace("-", "").replace(" ", "") if phone else ""
     normalized_id = national_id.strip().upper() if national_id else ""
     
-    # Create fingerprint from phone + national_id
-    fingerprint_data = f"{normalized_phone}|{normalized_id}"
+    # Include timestamp and UUID for uniqueness across uploads
+    timestamp = datetime.utcnow().isoformat()
+    unique_id = str(uuid.uuid4())[:8]
+    
+    # Create unique fingerprint for each entry
+    fingerprint_data = f"{normalized_phone}|{normalized_id}|{timestamp}|{unique_id}"
     return hashlib.md5(fingerprint_data.encode()).hexdigest()
 
 

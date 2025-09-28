@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fixed Date Badge Function Test</title>
+</head>
+<body>
+    <h2>Fixed Date Badge Function Test</h2>
+    <div id="output"></div>
+
+    <script>
+        // Updated function with proper timezone handling
+        function getUploadDateBadge(dateString, fallbackDate) {
+            const primaryDate = dateString || fallbackDate;
+            if (!primaryDate) return { class: 'date-older', text: 'Unknown' };
+            
+            try {
+                // Parse the UTC timestamp
+                const utcDate = new Date(primaryDate);
+                
+                if (isNaN(utcDate.getTime())) {
+                    return { class: 'date-older', text: 'Invalid Date' };
+                }
+                
+                // Get current date in IST timezone
+                // Since our system is in IST, new Date() already gives IST time
+                const istToday = new Date();
+                
+                // Convert UTC timestamp to IST properly
+                // The utcDate is parsed as UTC, so we need to add IST offset (+5:30)
+                const istUploadDate = new Date(utcDate.getTime() + (5.5 * 60 * 60 * 1000));
+                
+                // Get date strings for comparison (ignore time)
+                const todayDateString = istToday.toDateString();
+                const uploadDateString = istUploadDate.toDateString();
+                
+                // Debug info
+                console.log('Debug:', {
+                    original: primaryDate,
+                    utcDate: utcDate.toString(),
+                    istUploadDate: istUploadDate.toString(),
+                    istToday: istToday.toString(),
+                    todayDateString,
+                    uploadDateString,
+                    match: uploadDateString === todayDateString
+                });
+                
+                if (uploadDateString === todayDateString) {
+                    return { class: 'date-today', text: 'Today' };
+                }
+                
+                const yesterday = new Date(istToday);
+                yesterday.setDate(yesterday.getDate() - 1);
+                const yesterdayDateString = yesterday.toDateString();
+                
+                if (uploadDateString === yesterdayDateString) {
+                    return { class: 'date-yesterday', text: 'Yesterday' };
+                }
+                
+                const timeDiff = istToday.setHours(0,0,0,0) - istUploadDate.setHours(0,0,0,0);
+                const daysDiff = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
+                
+                if (daysDiff <= 7 && daysDiff > 0) {
+                    return { class: 'date-week', text: `${daysDiff}d ago` };
+                } else if (daysDiff < 0) {
+                    return { class: 'date-future', text: 'Future' };
+                }
+                
+                return { class: 'date-older', text: `${daysDiff}d ago` };
+                
+            } catch (error) {
+                console.error('Error in getUploadDateBadge:', error, primaryDate);
+                return { class: 'date-older', text: 'Date Error' };
+            }
+        }
+
+        // Test cases
+        const now = new Date();
+        const testCases = [
+            '2025-09-27T21:58:36.830525',  // 27th Sept 21:58 UTC = 28th Sept 03:28 IST (Today)
+            '2025-09-27T15:30:00.000000',  // 27th Sept 15:30 UTC = 27th Sept 21:00 IST (Yesterday)
+            '2025-09-26T15:30:00.000000',  // 26th Sept UTC (should be 2d ago)
+        ];
+        
+        let output = `<h3>Current IST Time: ${now.toString()}</h3><h3>Test Results:</h3>`;
+        
+        testCases.forEach((testDate, i) => {
+            const result = getUploadDateBadge(testDate);
+            output += `
+                <p><strong>Test ${i+1}:</strong> ${testDate}</p>
+                <p>Result: <span style="background: yellow; padding: 2px 5px;">${result.text}</span></p>
+                <hr>
+            `;
+        });
+        
+        document.getElementById('output').innerHTML = output;
+    </script>
+</body>
+</html>

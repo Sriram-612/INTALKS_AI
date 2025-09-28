@@ -1,0 +1,3 @@
+name,phone_number,loan_id,outstanding_amount,next_due_date,state
+Test Customer Today,+919999000001,LOAN_TODAY_001,25000,2025-11-15,Maharashtra
+Today Upload Test,+919999000002,LOAN_TODAY_002,30000,2025-12-01,Karnataka

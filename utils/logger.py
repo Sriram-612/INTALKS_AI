@@ -47,7 +47,7 @@ class JSONFormatter(logging.Formatter):
     
     def format(self, record):
         log_obj = {
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now().isoformat(),
             'level': record.levelname,
             'logger': record.name,
             'message': record.getMessage(),
@@ -92,14 +92,14 @@ def setup_logger(name, log_file, level=logging.INFO, max_bytes=10*1024*1024, bac
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
     
-    # Formatters
+    # Formatters - Using IST timestamps
     file_formatter = logging.Formatter(
-        '%(asctime)s | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s',
+        '%(asctime)s IST | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
     console_formatter = ColoredFormatter(
-        '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
+        '%(asctime)s IST | %(levelname)-8s | %(name)s | %(message)s',
         datefmt='%H:%M:%S'
     )
     
@@ -298,7 +298,7 @@ def setup_application_logging():
 
 All log files are rotated when they reach 10MB, keeping 5 backup files.
 
-Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST
 """)
     
     logger.app.info("🎉 Logging system initialized")
