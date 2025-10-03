@@ -1220,22 +1220,30 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                             last_transcription_time = time.time()
                         elif conversation_stage == "WAITING_AGENT_RESPONSE":
                             agent_question_repeat_count += 1
-                            if agent_question_repeat_count <= 2:  # Limit to 2 repeats
-                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
+                            if agent_question_repeat_count <= 3:  # Increased to 3 repeats for better user experience
+                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/3).")
                                 logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
                                 await play_agent_connect_question(websocket, call_detected_lang)
                                 # Reset the timer to wait for user response
                                 last_transcription_time = time.time()
                             else:
-                                logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
-                                logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
-                                customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                conversation_stage = "TRANSFERRING_TO_AGENT"
-                                interaction_complete = True
-                                # Wait for transfer message to be sent before ending loop
-                                await asyncio.sleep(2)
-                                break
+                                # After 3 attempts with no response, play a clarifying message and try once more
+                                logger.websocket.info("No clear response after 3 attempts. Playing clarification message.")
+                                logger.log_call_event("AGENT_QUESTION_CLARIFICATION", call_sid, customer_info['name'])
+                                
+                                # Play clarifying message asking for clear yes/no response
+                                clarification_msg = {
+                                    "en-IN": "Please say 'yes' if you want to speak to an agent, or 'no' if you don't need assistance.",
+                                    "hi-IN": "कृपया 'हां' कहें यदि आप एजेंट से बात करना चाहते हैं, या 'नहीं' कहें यदि आपको सहायता की आवश्यकता नहीं है।",
+                                    "ta-IN": "நீங்கள் ஒரு முகவரிடம் பேச விரும்பினால் 'ஆம்' என்று சொல்லுங்கள், அல்லது உங்களுக்கு உதவி தேவையில்லை என்றால் 'இல்லை' என்று சொல்லுங்கள்।"
+                                }
+                                clarify_text = clarification_msg.get(call_detected_lang, clarification_msg["en-IN"])
+                                audio_bytes = await sarvam_handler.synthesize_tts(clarify_text, call_detected_lang)
+                                await stream_audio_to_websocket(websocket, audio_bytes)
+                                
+                                # Reset counter for final attempt
+                                agent_question_repeat_count = 0
+                                last_transcription_time = time.time()
                         audio_buffer.clear()
                         last_transcription_time = now
                         continue
@@ -1289,7 +1297,11 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                     await play_agent_connect_question(websocket, call_detected_lang)
                                     conversation_stage = "WAITING_AGENT_RESPONSE"
                                     logger.websocket.info(f"✅ EMI details and agent question sent successfully")
+                                    logger.websocket.info(f"🎯 CONVERSATION STAGE SET TO: WAITING_AGENT_RESPONSE - Now waiting for user response to agent connect question")
                                     logger.log_call_event("EMI_DETAILS_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
+                                    # Clear audio buffer to ensure fresh start for agent response detection
+                                    audio_buffer.clear()
+                                    last_transcription_time = time.time()
                                 except Exception as e:
                                     logger.websocket.error(f"❌ Error playing EMI details: {e}")
                                     logger.log_call_event("EMI_DETAILS_ERROR", call_sid, customer_info['name'], {"error": str(e)})
@@ -1356,7 +1368,11 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                     await play_agent_connect_question(websocket, call_detected_lang)
                                     conversation_stage = "WAITING_AGENT_RESPONSE"
                                     logger.tts.info(f"✅ EMI details and agent question sent successfully in {call_detected_lang}")
+                                    logger.websocket.info(f"🎯 CONVERSATION STAGE SET TO: WAITING_AGENT_RESPONSE - Now waiting for user response to agent connect question")
                                     logger.log_call_event("EMI_DETAILS_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
+                                    # Clear audio buffer to ensure fresh start for agent response detection
+                                    audio_buffer.clear()
+                                    last_transcription_time = time.time()
                                 except Exception as e:
                                     logger.tts.error(f"❌ Error playing EMI details: {e}")
                                     logger.log_call_event("EMI_DETAILS_ERROR", call_sid, customer_info['name'], {"error": str(e)})
@@ -2131,20 +2147,29 @@ async def old_websocket_endpoint(websocket: WebSocket):
                             last_transcription_time = time.time()
                         elif conversation_stage == "WAITING_AGENT_RESPONSE":
                             agent_question_repeat_count += 1
-                            if agent_question_repeat_count <= 2:
-                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/2).")
+                            if agent_question_repeat_count <= 3:  # Increased to 3 repeats for better user experience
+                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/3).")
                                 logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
                                 await play_agent_connect_question(websocket, call_detected_lang)
                                 last_transcription_time = time.time()
                             else:
-                                logger.websocket.info("Too many no-audio responses. Assuming user wants agent transfer.")
-                                logger.log_call_event("AUTO_AGENT_TRANSFER_NO_AUDIO", call_sid, customer_info['name'])
-                                customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                conversation_stage = "TRANSFERRING_TO_AGENT"
-                                interaction_complete = True
-                                await asyncio.sleep(2)
-                                break
+                                # After 3 attempts with no response, play a clarifying message and try once more
+                                logger.websocket.info("No clear response after 3 attempts. Playing clarification message.")
+                                logger.log_call_event("AGENT_QUESTION_CLARIFICATION", call_sid, customer_info['name'])
+                                
+                                # Play clarifying message asking for clear yes/no response
+                                clarification_msg = {
+                                    "en-IN": "Please say 'yes' if you want to speak to an agent, or 'no' if you don't need assistance.",
+                                    "hi-IN": "कृपया 'हां' कहें यदि आप एजेंट से बात करना चाहते हैं, या 'नहीं' कहें यदि आपको सहायता की आवश्यकता नहीं है।",
+                                    "ta-IN": "நீங்கள் ஒரு முகவரிடம் பேச விரும்பினால் 'ஆம்' என்று சொல்லுங்கள், அல்லது உங்களுக்கு உதவி தேவையில்லை என்றால் 'இல்லை' என்று சொல்லுங்கள்।"
+                                }
+                                clarify_text = clarification_msg.get(call_detected_lang, clarification_msg["en-IN"])
+                                audio_bytes = await sarvam_handler.synthesize_tts(clarify_text, call_detected_lang)
+                                await stream_audio_to_websocket(websocket, audio_bytes)
+                                
+                                # Reset counter for final attempt
+                                agent_question_repeat_count = 0
+                                last_transcription_time = time.time()
                         audio_buffer.clear()
                         last_transcription_time = now
                         continue
@@ -2227,7 +2252,11 @@ async def old_websocket_endpoint(websocket: WebSocket):
                                     await play_agent_connect_question(websocket, call_detected_lang)
                                     conversation_stage = "WAITING_AGENT_RESPONSE"
                                     logger.tts.info(f"✅ EMI details and agent question sent successfully in {call_detected_lang}")
+                                    logger.websocket.info(f"🎯 CONVERSATION STAGE SET TO: WAITING_AGENT_RESPONSE - Now waiting for user response to agent connect question")
                                     logger.log_call_event("EMI_DETAILS_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
+                                    # Clear audio buffer to ensure fresh start for agent response detection
+                                    audio_buffer.clear()
+                                    last_transcription_time = time.time()
                                 except Exception as e:
                                     logger.tts.error(f"❌ Error playing EMI details: {e}")
                                     logger.log_call_event("EMI_DETAILS_ERROR", call_sid, customer_info['name'], {"error": str(e)})
