@@ -378,6 +378,105 @@
             color: #856404;
         }
 
+        /* Session Management Styles */
+        .user-session-info {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            color: #333;
+            padding: 10px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 500;
+            z-index: 1000;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border: 1px solid #e3e8ee;
+        }
+
+        .logout-button {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 0.85em;
+            font-weight: 500;
+            margin-left: 10px;
+            transition: all 0.3s ease;
+        }
+
+        .logout-button:hover {
+            background: #c82333;
+            transform: translateY(-1px);
+        }
+
+        .session-timer {
+            color: #666;
+            font-size: 0.8em;
+            margin-left: 8px;
+        }
+
+        .session-timer.warning {
+            color: #ffc107;
+            font-weight: 600;
+        }
+
+        .session-timer.critical {
+            color: #dc3545;
+            font-weight: 600;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+
+        .session-expired-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+        }
+
+        .session-expired-modal {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            text-align: center;
+            max-width: 400px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        .session-expired-modal h3 {
+            color: #dc3545;
+            margin-bottom: 15px;
+        }
+
+        .session-expired-modal p {
+            margin-bottom: 20px;
+            color: #666;
+        }
+
+        .session-expired-modal button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+        }
+
         /* Customer Details Modal */
         .customer-modal {
             display: none;
@@ -1056,6 +1155,22 @@
 
     <div class="connection-status" id="connectionStatus">Connecting...</div>
 
+    <!-- User Session Info -->
+    <div class="user-session-info" id="userSessionInfo" style="display: none;">
+        <span id="userDisplayName">User</span>
+        <span class="session-timer" id="sessionTimer">2:00:00</span>
+        <button class="logout-button" onclick="handleLogout()">Logout</button>
+    </div>
+
+    <!-- Session Expired Modal -->
+    <div class="session-expired-overlay" id="sessionExpiredOverlay" style="display: none;">
+        <div class="session-expired-modal">
+            <h3>🕒 Session Expired</h3>
+            <p>Your session has expired for security reasons. Please log in again to continue.</p>
+            <button onclick="redirectToLogin()">Login Again</button>
+        </div>
+    </div>
+
     <div class="container">
         <!-- Statistics Overview -->
         <div class="statistics-grid">
@@ -1469,13 +1584,18 @@
     </div>
 
     <script>
-        // Global variables
-        let customers = [];
-        let filteredCustomers = [];
-        let displayedCustomers = [];
-        let selectedCustomers = new Set();
-        
-        // Batch upload pagination variables
+    // Global variables
+    let customers = [];
+    let filteredCustomers = [];
+    let displayedCustomers = [];
+    let selectedCustomers = new Set();
+
+    // Session management variables
+    let sessionData = null;
+    let sessionCheckInterval = null;
+    let sessionWarningShown = false;
+
+    // Batch upload pagination variables
         let batchCurrentPage = 1;
         let batchPageSize = 25;  // Default to 25 per page
         let batchDateFilter = 'today';
@@ -1537,9 +1657,178 @@
             console.log('🚀 Dashboard initializing...');
             showGlobalLoading('Initializing Dashboard...', 'Setting up connection and loading data...');
             
-            // Initialize in sequence for better user experience
+            // Initialize session management first
+            initializeSessionManagement();
+            // Initialize dashboard after session management
             initializeDashboard();
         });
+
+        // === SESSION MANAGEMENT FUNCTIONS ===
+        
+        async function initializeSessionManagement() {
+            console.log('🔐 Initializing session management...');
+            
+            try {
+                // Check initial session status
+                await checkSessionStatus();
+                
+                // Start session monitoring
+                startSessionMonitoring();
+                
+                console.log('✅ Session management initialized');
+            } catch (error) {
+                console.error('❌ Session management initialization failed:', error);
+            }
+        }
+        
+        async function checkSessionStatus() {
+            try {
+                const response = await fetch('/auth/session-status');
+                const data = await response.json();
+                
+                if (data.authenticated) {
+                    sessionData = data;
+                    updateSessionDisplay(data);
+                } else {
+                    handleSessionExpired();
+                }
+                
+                return data;
+            } catch (error) {
+                console.error('Error checking session status:', error);
+                return { authenticated: false, expired: true };
+            }
+        }
+        
+        function updateSessionDisplay(data) {
+            const userSessionInfo = document.getElementById('userSessionInfo');
+            const userDisplayName = document.getElementById('userDisplayName');
+            const sessionTimer = document.getElementById('sessionTimer');
+            
+            if (data.authenticated && data.user) {
+                userDisplayName.textContent = data.user.name || data.user.email;
+                updateSessionTimer(data.remaining_time);
+                userSessionInfo.style.display = 'block';
+            } else {
+                userSessionInfo.style.display = 'none';
+            }
+        }
+        
+        function updateSessionTimer(remainingSeconds) {
+            const sessionTimer = document.getElementById('sessionTimer');
+            
+            if (remainingSeconds <= 0) {
+                sessionTimer.textContent = 'Expired';
+                sessionTimer.className = 'session-timer critical';
+                handleSessionExpired();
+                return;
+            }
+            
+            const hours = Math.floor(remainingSeconds / 3600);
+            const minutes = Math.floor((remainingSeconds % 3600) / 60);
+            const seconds = remainingSeconds % 60;
+            
+            const timeString = `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            sessionTimer.textContent = timeString;
+            
+            // Change color based on remaining time
+            if (remainingSeconds <= 300) { // 5 minutes
+                sessionTimer.className = 'session-timer critical';
+                if (!sessionWarningShown) {
+                    showSessionWarning(remainingSeconds);
+                    sessionWarningShown = true;
+                }
+            } else if (remainingSeconds <= 600) { // 10 minutes
+                sessionTimer.className = 'session-timer warning';
+            } else {
+                sessionTimer.className = 'session-timer';
+            }
+        }
+        
+        function startSessionMonitoring() {
+            // Check session status every 30 seconds
+            sessionCheckInterval = setInterval(async () => {
+                const status = await checkSessionStatus();
+                if (!status.authenticated) {
+                    stopSessionMonitoring();
+                    handleSessionExpired();
+                }
+            }, 30000);
+            
+            // Update timer every second
+            setInterval(() => {
+                if (sessionData && sessionData.remaining_time > 0) {
+                    sessionData.remaining_time--;
+                    updateSessionTimer(sessionData.remaining_time);
+                }
+            }, 1000);
+        }
+        
+        function stopSessionMonitoring() {
+            if (sessionCheckInterval) {
+                clearInterval(sessionCheckInterval);
+                sessionCheckInterval = null;
+            }
+        }
+        
+        function showSessionWarning(remainingSeconds) {
+            const minutes = Math.ceil(remainingSeconds / 60);
+            showToast(`⚠️ Session expires in ${minutes} minute${minutes > 1 ? 's' : ''}! Please save your work.`, 'warning', 10000);
+        }
+        
+        function handleSessionExpired() {
+            console.log('🕒 Session expired - showing modal');
+            
+            // Stop monitoring
+            stopSessionMonitoring();
+            
+            // Show expired modal
+            document.getElementById('sessionExpiredOverlay').style.display = 'flex';
+            
+            // Hide session info
+            document.getElementById('userSessionInfo').style.display = 'none';
+        }
+        
+        async function handleLogout() {
+            if (!confirm('Are you sure you want to logout?')) {
+                return;
+            }
+            
+            console.log('🚪 Logout initiated by user');
+            
+            try {
+                // Show loading
+                showGlobalLoading('Logging out...', 'Please wait while we securely log you out');
+                
+                // Call logout API
+                const response = await fetch('/api/logout', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Stop session monitoring
+                    stopSessionMonitoring();
+                    
+                    // Redirect to Cognito logout
+                    window.location.href = data.logout_url;
+                } else {
+                    throw new Error(data.message || 'Logout failed');
+                }
+            } catch (error) {
+                console.error('Logout error:', error);
+                hideGlobalLoading();
+                showToast('❌ Logout failed. Please try again.', 'error');
+            }
+        }
+        
+        function redirectToLogin() {
+            window.location.href = '/login';
+        }
 
         async function initializeDashboard() {
             try {

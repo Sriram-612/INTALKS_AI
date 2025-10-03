@@ -21,7 +21,7 @@ class RedisSessionMiddleware(BaseHTTPMiddleware):
         self,
         app: ASGIApp,
         secret_key: str,
-        max_age: int = 3600 * 24 * 7,  # 7 days
+        max_age: int = 3600 * 2,  # 2 hours default
         session_cookie: str = "session_id",
         redis_url: Optional[str] = None,
         domain: Optional[str] = None,
@@ -178,6 +178,26 @@ class SessionDict:
                 )
             except Exception as e:
                 print(f"Error immediately saving session {self.session_id}: {e}")
+    
+    def extend_session(self, new_max_age: Optional[int] = None):
+        """Extend session expiration time"""
+        max_age = new_max_age or self.max_age
+        if self.redis_client and self.data:
+            try:
+                # Update expiration time in Redis
+                self.redis_client.expire(f"session:{self.session_id}", max_age)
+                print(f"Session {self.session_id} extended for {max_age} seconds")
+            except Exception as e:
+                print(f"Error extending session {self.session_id}: {e}")
+    
+    def get_ttl(self):
+        """Get time to live for session"""
+        if self.redis_client:
+            try:
+                return self.redis_client.ttl(f"session:{self.session_id}")
+            except Exception as e:
+                print(f"Error getting TTL for session {self.session_id}: {e}")
+        return -1
 
 
 def get_session(request: Request) -> SessionDict:
