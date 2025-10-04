@@ -47,11 +47,11 @@ class CognitoHostedUIAuth:
     def get_login_url(self, state: str = "default") -> str:
         """Generate Cognito hosted UI login URL"""
         # Use the correct hosted UI login endpoint
-        auth_url = f"{COGNITO_DOMAIN}/login/continue"
+        auth_url = f"{COGNITO_DOMAIN}/login"
         params = {
             "client_id": CLIENT_ID,
             "response_type": "code",
-            "scope": "email openid profile",
+            "scope": "openid email profile",  # Fixed scope order 
             "redirect_uri": REDIRECT_URI,
             "state": state
         }

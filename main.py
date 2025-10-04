@@ -105,7 +105,7 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 sarvam_handler = ProductionSarvamHandler(SARVAM_API_KEY)
 
 # --- Constants ---
-BUFFER_DURATION_SECONDS = 5.0  # Wait 5 seconds for user response (increased from 1.0)
+BUFFER_DURATION_SECONDS = 7.0  # Wait 7 seconds for user response (CONVERSATION FLOW FIX: increased to allow more thinking time)
 AGENT_RESPONSE_BUFFER_DURATION = 7.0  # Wait even longer for user to answer agent connect question
 MIN_AUDIO_BYTES = 3200  # ~0.2s at 8kHz 16-bit mono; ignore too-short buffers
 
@@ -237,7 +237,12 @@ async def stream_audio_to_websocket(websocket, audio_bytes):
         await asyncio.sleep(0.02)  # simulate real-time playback
     # Provide a tiny cushion only; chunk pacing already matched duration
     print(f"[stream_audio_to_websocket] Streamed ~{duration_ms:.0f}ms of audio (paced)")
-    await asyncio.sleep(0.1)
+    
+    # CONVERSATION FLOW FIX: Add proper pause after audio streaming to allow user processing time
+    # This ensures user has time to hear and process the audio before system starts listening
+    processing_time = max(0.5, duration_ms / 2000)  # At least 0.5s, or half the audio duration
+    await asyncio.sleep(processing_time)
+    print(f"[stream_audio_to_websocket] Provided {processing_time:.1f}s processing time after audio")
 
 async def stream_audio_to_websocket_not_working(websocket, audio_bytes):
     CHUNK_SIZE = 8000  # Send 1 second of audio at a time
@@ -327,6 +332,11 @@ async def play_agent_connect_question(websocket, lang: str):
     logger.tts.info(f"🔁 Converting agent connect question: {prompt_text}")
     audio_bytes = await sarvam_handler.synthesize_tts(prompt_text, lang)
     await stream_audio_to_websocket(websocket, audio_bytes)
+    
+    # CONVERSATION FLOW FIX: Give user adequate time to process the question and respond
+    logger.websocket.info("⏳ Waiting for user to process agent connect question...")
+    await asyncio.sleep(2.0)  # Wait 2 seconds for user to process the question
+    logger.websocket.info("🎯 Now actively listening for user response to agent question")
 
 async def play_goodbye_after_decline(websocket, lang: str):
     """Plays a goodbye message if the user declines agent connection."""
@@ -1221,11 +1231,13 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                         elif conversation_stage == "WAITING_AGENT_RESPONSE":
                             agent_question_repeat_count += 1
                             if agent_question_repeat_count <= 3:  # Increased to 3 repeats for better user experience
-                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/3).")
-                                logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
+                                logger.websocket.info(f"💭 CONVERSATION FLOW: No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/3).")
+                                logger.websocket.info(f"⏱️ User had {BUFFER_DURATION_SECONDS} seconds to respond - extending patience...")
+                                logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count, "timeout": BUFFER_DURATION_SECONDS})
                                 await play_agent_connect_question(websocket, call_detected_lang)
                                 # Reset the timer to wait for user response
                                 last_transcription_time = time.time()
+                                logger.websocket.info(f"🎯 Timer reset - now waiting another {BUFFER_DURATION_SECONDS}s for user response...")
                             else:
                                 # After 3 attempts with no response, play a clarifying message and try once more
                                 logger.websocket.info("No clear response after 3 attempts. Playing clarification message.")
@@ -1299,9 +1311,15 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                     logger.websocket.info(f"✅ EMI details and agent question sent successfully")
                                     logger.websocket.info(f"🎯 CONVERSATION STAGE SET TO: WAITING_AGENT_RESPONSE - Now waiting for user response to agent connect question")
                                     logger.log_call_event("EMI_DETAILS_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
-                                    # Clear audio buffer to ensure fresh start for agent response detection
+                                    
+                                    # CONVERSATION FLOW FIX: Reset timers and buffers for proper user response detection
                                     audio_buffer.clear()
                                     last_transcription_time = time.time()
+                                    agent_question_repeat_count = 0  # Reset repeat counter for fresh start
+                                    
+                                    # Give extra time for user to formulate response after all the information
+                                    logger.websocket.info("⏳ Extended wait period - user processing EMI info and agent question...")
+                                    await asyncio.sleep(1.0)  # Additional processing time after information delivery
                                 except Exception as e:
                                     logger.websocket.error(f"❌ Error playing EMI details: {e}")
                                     logger.log_call_event("EMI_DETAILS_ERROR", call_sid, customer_info['name'], {"error": str(e)})
@@ -1370,9 +1388,15 @@ async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_
                                     logger.tts.info(f"✅ EMI details and agent question sent successfully in {call_detected_lang}")
                                     logger.websocket.info(f"🎯 CONVERSATION STAGE SET TO: WAITING_AGENT_RESPONSE - Now waiting for user response to agent connect question")
                                     logger.log_call_event("EMI_DETAILS_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
-                                    # Clear audio buffer to ensure fresh start for agent response detection
+                                    
+                                    # CONVERSATION FLOW FIX: Reset timers and buffers for proper user response detection  
                                     audio_buffer.clear()
                                     last_transcription_time = time.time()
+                                    agent_question_repeat_count = 0  # Reset repeat counter for fresh start
+                                    
+                                    # Give extra time for user to formulate response after language switch
+                                    logger.websocket.info("⏳ Language detection flow - additional wait after EMI info and agent question...")
+                                    await asyncio.sleep(1.0)  # Additional processing time for language detection flow
                                 except Exception as e:
                                     logger.tts.error(f"❌ Error playing EMI details: {e}")
                                     logger.log_call_event("EMI_DETAILS_ERROR", call_sid, customer_info['name'], {"error": str(e)})
@@ -2046,9 +2070,68 @@ async def old_websocket_endpoint(websocket: WebSocket):
                         except Exception as e:
                             logger.database.error(f"❌ Error looking up customer in database: {e}")
                 
-                # 3. If no customer found, this is an error
+                # 3. If no customer found initially, wait for data (race condition fix)
                 if not customer_info:
-                    logger.database.error("❌ No customer data found - cannot proceed without real customer information")
+                    logger.websocket.info("⏳ Customer data not found immediately - waiting for passthru handler...")
+                    
+                    # Wait up to 10 seconds for customer data to arrive via passthru handler
+                    max_wait_time = 10
+                    wait_interval = 0.5
+                    waited_time = 0
+                    
+                    while waited_time < max_wait_time and not customer_info:
+                        await asyncio.sleep(wait_interval)
+                        waited_time += wait_interval
+                        
+                        # Try Redis again
+                        if call_sid:
+                            redis_data = redis_manager.get_call_session(call_sid)
+                            if redis_data:
+                                customer_info = {
+                                    'name': redis_data.get('name'),
+                                    'loan_id': redis_data.get('loan_id'),
+                                    'amount': redis_data.get('amount'),
+                                    'due_date': redis_data.get('due_date'),
+                                    'lang': redis_data.get('language_code', 'en-IN'),
+                                    'phone': redis_data.get('phone_number', ''),
+                                    'state': redis_data.get('state', '')
+                                }
+                                logger.database.info(f"✅ Found customer data after waiting {waited_time}s: {customer_info['name']}")
+                                logger.log_call_event("CUSTOMER_DATA_FOUND_AFTER_WAIT", call_sid, customer_info['name'], customer_info)
+                                break
+                        
+                        # Try database again
+                        if not customer_info and call_sid:
+                            try:
+                                session_db = db_manager.get_session()
+                                call_session = get_call_session_by_sid(session_db, call_sid)
+                                if call_session and call_session.customer_id:
+                                    customer = session_db.query(Customer).filter(Customer.id == call_session.customer_id).first()
+                                    if customer:
+                                        customer_info = {
+                                            'name': customer.name,
+                                            'loan_id': customer.loan_id,
+                                            'amount': customer.amount,
+                                            'due_date': customer.due_date,
+                                            'lang': customer.language_code or 'en-IN',
+                                            'phone': customer.phone_number,
+                                            'state': customer.state or ''
+                                        }
+                                        logger.database.info(f"✅ Found customer in database after waiting {waited_time}s: {customer_info['name']}")
+                                        logger.log_call_event("CUSTOMER_DATA_FOUND_DATABASE_AFTER_WAIT", call_sid, customer_info['name'], customer_info)
+                                        break
+                                session_db.close()
+                            except Exception as e:
+                                logger.database.error(f"❌ Error looking up customer in database during wait: {e}")
+                    
+                    if customer_info:
+                        logger.websocket.info(f"🎉 Successfully found customer data after waiting {waited_time}s")
+                    else:
+                        logger.websocket.warning(f"⚠️ Still no customer data found after waiting {max_wait_time}s")
+                
+                # 4. Final check - if still no customer found, this is an error
+                if not customer_info:
+                    logger.database.error("❌ No customer data found after waiting - cannot proceed without real customer information")
                     logger.log_call_event("CUSTOMER_DATA_NOT_FOUND", call_sid)
                     await websocket.send_text(json.dumps({
                         "event": "error",
