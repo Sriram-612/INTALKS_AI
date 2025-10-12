@@ -47,7 +47,7 @@ class JSONFormatter(logging.Formatter):
     
     def format(self, record):
         log_obj = {
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': datetime.utcnow().isoformat(),
             'level': record.levelname,
             'logger': record.name,
             'message': record.getMessage(),
@@ -92,14 +92,14 @@ def setup_logger(name, log_file, level=logging.INFO, max_bytes=10*1024*1024, bac
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
     
-    # Formatters - Using IST timestamps
+    # Formatters
     file_formatter = logging.Formatter(
-        '%(asctime)s IST | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s',
+        '%(asctime)s | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
     console_formatter = ColoredFormatter(
-        '%(asctime)s IST | %(levelname)-8s | %(name)s | %(message)s',
+        '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
         datefmt='%H:%M:%S'
     )
     
@@ -147,7 +147,7 @@ class VoiceAssistantLogger:
     
     def __init__(self):
         self.app = app_logger
-        self.error_logger = error_logger
+        self.error = error_logger
         self.websocket = websocket_logger
         self.tts = tts_logger
         self.database = database_logger
@@ -172,17 +172,17 @@ class VoiceAssistantLogger:
         """Log error message"""
         self.app.error(message, *args, **kwargs)
         # Also log to dedicated error logger
-        self.error_logger.error(message, *args, **kwargs)
+        error_logger.error(message, *args, **kwargs)
     
     def critical(self, message, *args, **kwargs):
         """Log critical message"""
         self.app.critical(message, *args, **kwargs)
-        self.error_logger.critical(message, *args, **kwargs)
+        error_logger.critical(message, *args, **kwargs)
     
     def exception(self, message, *args, **kwargs):
         """Log exception with traceback"""
         self.app.exception(message, *args, **kwargs)
-        self.error_logger.exception(message, *args, **kwargs)
+        error_logger.exception(message, *args, **kwargs)
     
     def log_websocket_message(self, message_type, data, call_sid=None, session_id=None):
         """Log WebSocket messages with structured data"""
@@ -210,7 +210,7 @@ class VoiceAssistantLogger:
             self.tts.info(log_msg, extra={'call_sid': call_sid})
         else:
             self.tts.error(f"{log_msg} - {error}", extra={'call_sid': call_sid})
-            self.error(f"TTS Error in {operation}: {error}", extra={'call_sid': call_sid})
+            self.error.error(f"TTS Error in {operation}: {error}", extra={'call_sid': call_sid})
     
     def log_database_operation(self, operation, table, status, details=None, error=None):
         """Log database operations"""
@@ -220,7 +220,7 @@ class VoiceAssistantLogger:
             self.database.info(log_msg)
         else:
             self.database.error(f"{log_msg} - {error}")
-            self.error(f"Database Error in {operation}: {error}")
+            self.error.error(f"Database Error in {operation}: {error}")
     
     def log_call_event(self, event, call_sid, customer_id=None, details=None):
         """Log call-related events"""
@@ -244,12 +244,12 @@ class VoiceAssistantLogger:
         log_msg = f"[ERROR] {error_type}: {message}"
         
         if exception:
-            self.error(log_msg, exc_info=exception, extra={
+            self.error.error(log_msg, exc_info=exception, extra={
                 'call_sid': call_sid,
                 'context': context
             })
         else:
-            self.error(log_msg, extra={
+            self.error.error(log_msg, extra={
                 'call_sid': call_sid,
                 'context': context
             })
@@ -266,7 +266,7 @@ def log_function_entry(func):
             logger.app.debug(f"Exiting {func.__name__}")
             return result
         except Exception as e:
-            logger.error(f"Error in {func.__name__}: {str(e)}", exc_info=True)
+            logger.error.error(f"Error in {func.__name__}: {str(e)}", exc_info=True)
             raise
     return wrapper
 
@@ -298,7 +298,7 @@ def setup_application_logging():
 
 All log files are rotated when they reach 10MB, keeping 5 backup files.
 
-Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST
+Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """)
     
     logger.app.info("🎉 Logging system initialized")
@@ -311,7 +311,7 @@ if __name__ == "__main__":
     setup_application_logging()
     
     logger.app.info("Testing application logger")
-    logger.error("Testing error logger")
+    logger.error.error("Testing error logger")
     logger.websocket.info("Testing websocket logger")
     logger.tts.info("Testing TTS logger")
     logger.database.info("Testing database logger")

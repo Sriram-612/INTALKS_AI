@@ -1,0 +1,5 @@
+name,phone,loan_id,amount,due_date,state,Cluster,Branch,Branch Contact Number,Employee,Employee ID,Employee Contact Number,Last Paid Date,Last Paid Amount,Due Amount
+Vijay,9384531725,LOAN004,450000,2024-02-05,Tamil Nadu,West Cluster,Mumbai Fort Branch,021-34355543,Suresh Kumar,EMP004,9384531726,2023-12-05,2000,25000
+Naveen,7358695296,LOAN003,250000,2025-11-10,Tamil Nadu,West Cluster,Mumbai Fort Branch,021-34355523,Ambika,EMP002,9003082769,2023-12-11,4000,30000
+Jagan Prasath J,9940430392,LOAN005,250000,2025-11-10,Tamil Nadu,West Cluster,Mumbai Fort Branch,021-34355523,Ambika,EMP002,9003082769,2023-12-11,4000,30000
+

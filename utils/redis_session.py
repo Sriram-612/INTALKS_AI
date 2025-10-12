@@ -202,27 +202,55 @@ class RedisSessionManager:
     
     def link_session_to_sid(self, temp_call_id: str, official_call_sid: str):
         """Link a temporary call session to the official Exotel CallSid"""
-        # Get the temporary call session data
-        temp_data = self.get_temp_data(temp_call_id)
-        if temp_data:
-            # Create a new session with the official CallSid
-            self.create_call_session(official_call_sid, temp_data.get('customer_data', {}), temp_data.get('websocket_id'))
-            
-            # Transfer any conversation history
-            if 'conversation_history' in temp_data:
-                session_data = self.get_call_session(official_call_sid)
-                if session_data:
-                    session_data['conversation_history'] = temp_data['conversation_history']
-                    key = f"call_session:{official_call_sid}"
-                    self.redis_client.setex(key, self.call_session_ttl, json.dumps(session_data))
-            
-            # Clean up temporary session
+        temp_session = self.get_call_session(temp_call_id)
+        if not temp_session:
+            temp_data = self.get_temp_data(temp_call_id)
+            if temp_data:
+                temp_session = temp_data
+
+        if temp_session:
+            customer_data = temp_session.get('customer_data', {})
+            websocket_id = temp_session.get('websocket_id')
+            conversation_history = temp_session.get('conversation_history', [])
+            status_history = temp_session.get('status_history', [])
+
+            self.create_call_session(official_call_sid, customer_data, websocket_id)
+
+            key = f"call_session:{official_call_sid}"
+            session_data = self.get_call_session(official_call_sid) or {}
+            session_data['conversation_history'] = conversation_history
+            session_data['status_history'] = status_history
+            self.redis_client.setex(key, self.call_session_ttl, json.dumps(session_data))
+
+            self.redis_client.delete(f"call_session:{temp_call_id}")
             self.remove_temp_data(temp_call_id)
-            
-            print(f"✅ [Redis] Linked temp session {temp_call_id} to CallSid {official_call_sid}")
+
+    # ------------------------------------------------------------------
+    # Event broadcasting helpers
+    # ------------------------------------------------------------------
+
+    def publish_event(self, call_sid: Optional[str], event: Dict[str, Any], channel: Optional[str] = None) -> bool:
+        """Publish a realtime event over Redis pub/sub.
+
+        Args:
+            call_sid: Identifier for the call; used to namespace the channel when
+                a custom channel is not provided.
+            event: Serializable payload describing the event.
+            channel: Optional explicit channel name. Defaults to an event stream
+                derived from the call SID or a global broadcast channel.
+
+        Returns:
+            True if the publish succeeds, False otherwise.
+        """
+
+        target_channel = channel or (f"call_events:{call_sid}" if call_sid else "call_events:global")
+        try:
+            payload = json.dumps(event, default=str)
+            self.redis_client.publish(target_channel, payload)
             return True
-        else:
-            print(f"⚠️ [Redis] No temp session found for {temp_call_id}")
+        except Exception as exc:
+            # Fallback logging via print keeps the dependency surface small for utils.
+            print(f"❌ Redis publish_event failed on channel {target_channel}: {exc}")
             return False
     
     # Notification System

@@ -34,10 +34,24 @@ def parse_chat_history(chat_history_list):
     # For intent classification and summarization, we append a user message so it should be fine.
     return messages
 
-def invoke_claude_model(messages, model_id="arn:aws:bedrock:eu-north-1:844605843483:inference-profile/eu.anthropic.claude-3-7-sonnet-20250219-v1:0"):
+def invoke_claude_model(messages, model_id=None):
     """
     Helper function to invoke the Claude model with a given set of messages.
     """
+    # Use environment variable for model ID, with fallback
+    if model_id is None:
+        model_id = os.getenv("CLAUDE_INTENT_MODEL_ID", "arn:aws:bedrock:eu-north-1:844605843483:inference-profile/eu.anthropic.claude-3-7-sonnet-20250219-v1:0")
+    
+    # 🔍 DEBUG: Enhanced logging for Claude model invocation
+    print(f"🤖 [CLAUDE_DEBUG] Model ID: {model_id}")
+    print(f"🤖 [CLAUDE_DEBUG] Environment CLAUDE_INTENT_MODEL_ID: {os.getenv('CLAUDE_INTENT_MODEL_ID', 'NOT_SET')}")
+    print(f"🤖 [CLAUDE_DEBUG] Messages count: {len(messages)}")
+    if messages:
+        last_message = messages[-1]
+        if 'content' in last_message and last_message['content']:
+            content_text = last_message['content'][0].get('text', '')[:100]
+            print(f"🤖 [CLAUDE_DEBUG] Last message content: '{content_text}...'")
+    
     body = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 4096, # Adjust max_tokens as needed for your responses/summaries
@@ -45,6 +59,7 @@ def invoke_claude_model(messages, model_id="arn:aws:bedrock:eu-north-1:844605843
     }
 
     try:
+        print(f"🤖 [CLAUDE_DEBUG] Invoking Claude model...")
         response = bedrock_runtime.invoke_model(
             body=json.dumps(body),
             modelId=model_id,
@@ -52,16 +67,23 @@ def invoke_claude_model(messages, model_id="arn:aws:bedrock:eu-north-1:844605843
             accept="application/json"
         )
         response_body = json.loads(response.get('body').read())
+        print(f"🤖 [CLAUDE_DEBUG] Response received successfully")
 
         # Claude 3 models return content as a list of content blocks
         generated_text = ""
         for content_block in response_body.get('content', []):
             if content_block.get('type') == 'text':
                 generated_text += content_block['text']
+        
+        print(f"🤖 [CLAUDE_DEBUG] Generated text: '{generated_text.strip()}'")
         return generated_text
 
     except Exception as e:
-        print(f"❌ Error invoking Claude model: {e}")
+        print(f"❌ [CLAUDE_DEBUG] Error invoking Claude model: {e}")
+        print(f"❌ [CLAUDE_DEBUG] Model ID used: {model_id}")
+        print(f"❌ [CLAUDE_DEBUG] Error type: {type(e).__name__}")
+        import traceback
+        print(f"❌ [CLAUDE_DEBUG] Full traceback: {traceback.format_exc()}")
         raise # Re-raise the exception to be handled by the calling function
 
 def generate_response(query_type, data, chat_history):
