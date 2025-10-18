@@ -19,7 +19,7 @@ from typing import Optional, List
 from sqlalchemy import (
     create_engine, MetaData, Column, String, Text, Integer, 
     Numeric, Date, DateTime, Boolean, JSON, UUID, ForeignKey,
-    UniqueConstraint, Index, func, text
+    UniqueConstraint, Index, func, text, inspect
 )
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload
@@ -54,6 +54,8 @@ class Customer(Base):
     national_id = Column(String(50), nullable=True)
     email = Column(String(255), nullable=True)
     state = Column(String(100), nullable=True)  # Customer's state
+    status = Column(String(50), nullable=True, default='not_initiated')
+    call_status = Column(String(50), nullable=True, default='not_initiated')
     first_uploaded_at = Column(DateTime, nullable=True)
     last_contact_date = Column(DateTime, nullable=True)
     do_not_call = Column(Boolean, default=False, nullable=False)
@@ -216,7 +218,7 @@ class CallSession(Base):
     loan_id = Column(PG_UUID(as_uuid=True), ForeignKey('loans.id', ondelete='CASCADE'), nullable=True)
     customer_id = Column(PG_UUID(as_uuid=True), ForeignKey('customers.id', ondelete='CASCADE'), nullable=False)
     initiated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    status = Column(String(50), default='scheduled', nullable=False)
+    status = Column(String(50), default='not_initiated', nullable=False)
     duration_seconds = Column(Integer, nullable=True)
     from_number = Column(String(20), nullable=True)
     to_number = Column(String(20), nullable=False)
@@ -261,10 +263,51 @@ def get_session() -> Session:
     return SessionLocal()
 
 
+def ensure_customer_status_column(
+    default_status: str = "not_initiated",
+    default_call_status: str = "not_initiated",
+) -> None:
+    """Ensure the `customers` table has the expected status columns."""
+    try:
+        inspector = inspect(engine)
+        if "customers" not in inspector.get_table_names():
+            return
+
+        existing_columns = {col["name"] for col in inspector.get_columns("customers")}
+
+        statements = []
+        parameters = {}
+
+        if "status" not in existing_columns:
+            statements.append("ADD COLUMN IF NOT EXISTS status VARCHAR(50)")
+        if "call_status" not in existing_columns:
+            statements.append("ADD COLUMN IF NOT EXISTS call_status VARCHAR(50)")
+
+        if statements:
+            alter_sql = "ALTER TABLE customers " + ", ".join(statements)
+            with engine.begin() as conn:
+                conn.execute(text(alter_sql))
+
+        with engine.begin() as conn:
+            if "status" in existing_columns or statements:
+                conn.execute(
+                    text("UPDATE customers SET status = :default_status WHERE status IS NULL"),
+                    {"default_status": default_status},
+                )
+            if "call_status" in existing_columns or statements:
+                conn.execute(
+                    text("UPDATE customers SET call_status = :default_call_status WHERE call_status IS NULL"),
+                    {"default_call_status": default_call_status},
+                )
+    except Exception as exc:
+        print(f"⚠️ Failed to ensure customers status columns: {exc}")
+
+
 def init_database() -> bool:
     """Initialize the database - create tables if they don't exist"""
     try:
-        Base.metadata.create_all(bind=engine)
+        Base.metadata.create_all(bind=engine, checkfirst=True)
+        ensure_customer_status_column()
         return True
     except Exception as e:
         print(f"Error initializing database: {e}")
@@ -403,19 +446,21 @@ def create_call_session(session: Session, call_data: dict) -> CallSession:
 
 class CallStatus:
     """Call status constants for compatibility"""
-    INITIATED = "initiated"
-    RINGING = "ringing"
-    IN_PROGRESS = "in_progress"
-    CALL_IN_PROGRESS = "call_in_progress"  # Alias for compatibility
+    NOT_INITIATED = "not_initiated"
+    INITIATED = "calling"
+    CALLING = "calling"
+    RINGING = "calling"
+    IN_PROGRESS = "call_in_progress"
+    CALL_IN_PROGRESS = "call_in_progress"
     AGENT_TRANSFER = "agent_transfer"
-    COMPLETED = "completed"
-    CALL_COMPLETED = "call_completed"  # Alias for compatibility
+    COMPLETED = "call_completed"
+    CALL_COMPLETED = "call_completed"
     FAILED = "failed"
-    CALL_FAILED = "call_failed"  # Alias for compatibility
-    NOT_PICKED = "not_picked"
+    CALL_FAILED = "failed"
+    NOT_PICKED = "disconnected"
     DISCONNECTED = "disconnected"
-    BUSY = "busy"
-    NO_ANSWER = "no_answer"
+    BUSY = "disconnected"
+    NO_ANSWER = "disconnected"
 
 class CallStatusUpdate(Base):
     """Call status update tracking table"""
@@ -477,19 +522,48 @@ def update_call_status(session, call_sid: str, status: str, message: str = None,
         call_session = get_call_session_by_sid(session, call_sid)
         if call_session:
             # Update main status
-            call_session.status = status
+            normalized_status = (status or CallStatus.CALLING).lower()
+            status_priority = {
+                CallStatus.NOT_INITIATED: 0,
+                "ready": 0,
+                CallStatus.CALLING: 1,
+                CallStatus.CALL_IN_PROGRESS: 2,
+                CallStatus.AGENT_TRANSFER: 2,
+                CallStatus.CALL_COMPLETED: 3,
+                CallStatus.DISCONNECTED: 3,
+                CallStatus.FAILED: 3,
+            }
+
+            current_status = (call_session.status or CallStatus.CALLING).lower()
+            current_priority = status_priority.get(current_status, 0)
+            new_priority = status_priority.get(normalized_status, 0)
+
+            if new_priority < current_priority:
+                print(f"⚠️ Skipping status downgrade for {call_sid}: {current_status} → {normalized_status}")
+                return call_session
+
+            call_session.status = normalized_status
             call_session.updated_at = datetime.utcnow()
+
+            # Sync customer status with latest call session status
+            if call_session.customer:
+                call_session.customer.status = normalized_status
+                if hasattr(call_session.customer, "call_status"):
+                    call_session.customer.call_status = normalized_status
+                # Touch last_contact_date for meaningful statuses
+                if normalized_status not in {"ready", "not_initiated"}:
+                    call_session.customer.last_contact_date = datetime.utcnow()
             
             # Create status update record
             status_update = CallStatusUpdate(
                 call_session_id=call_session.id,
-                status=status,
+                status=normalized_status,
                 message=message,
                 extra_data=extra_data
             )
             session.add(status_update)
             session.commit()
-            print(f"✅ Updated call {call_sid} status to: {status}")
+            print(f"✅ Updated call {call_sid} status to: {normalized_status}")
             return call_session
         else:
             print(f"⚠️ Call session not found: {call_sid}")
@@ -499,12 +573,17 @@ def update_call_status(session, call_sid: str, status: str, message: str = None,
         print(f"❌ Error updating call status: {e}")
         return None
 
-def update_customer_call_status_by_phone(session, phone: str, status: str) -> bool:
-    """Update customer call status by phone number"""
+def update_customer_call_status_by_phone(session, phone: str, status: str, call_attempt: bool = False) -> bool:
+    """Update customer status by phone number"""
     try:
+        normalized_status = (status or 'ready').lower()
         customer = get_customer_by_phone(session, phone)
         if customer:
-            customer.last_contact_date = datetime.utcnow()
+            customer.status = normalized_status
+            if hasattr(customer, "call_status"):
+                customer.call_status = normalized_status
+            if call_attempt:
+                customer.last_contact_date = datetime.utcnow()
             session.commit()
             return True
         return False
@@ -513,12 +592,17 @@ def update_customer_call_status_by_phone(session, phone: str, status: str) -> bo
         print(f"❌ Error updating customer call status: {e}")
         return False
 
-def update_customer_call_status(session, customer_id: str, status: str) -> bool:
-    """Update customer call status by customer ID"""
+def update_customer_call_status(session, customer_id: str, status: str, call_attempt: bool = False) -> bool:
+    """Update customer status by customer ID"""
     try:
+        normalized_status = (status or 'ready').lower()
         customer = session.query(Customer).filter(Customer.id == customer_id).first()
         if customer:
-            customer.last_contact_date = datetime.utcnow()
+            customer.status = normalized_status
+            if hasattr(customer, "call_status"):
+                customer.call_status = normalized_status
+            if call_attempt:
+                customer.last_contact_date = datetime.utcnow()
             session.commit()
             return True
         return False
@@ -533,7 +617,7 @@ def update_customer_call_status(session, customer_id: str, status: str) -> bool:
 
 # Export commonly used items
 __all__ = [
-    'Base', 'engine', 'SessionLocal', 'get_session', 'init_database',
+    'Base', 'engine', 'SessionLocal', 'get_session', 'init_database', 'ensure_customer_status_column',
     'Customer', 'Loan', 'FileUpload', 'UploadRow', 'CallSession', 'CallStatusUpdate',
     'CallStatus', 'db_manager', 'DatabaseManager',
     'compute_fingerprint', 'normalize_phone',

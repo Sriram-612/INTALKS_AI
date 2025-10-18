@@ -1,6 +1,7 @@
 import base64
 import tempfile
 import io
+import os
 from pydub import AudioSegment
 from sarvamai import SarvamAI
 from sarvamai import AsyncSarvamAI, AudioOutput
@@ -38,6 +39,62 @@ class SarvamHandler:
             'pa-IN': 'pa-IN',
             'od-IN': 'od-IN'
         }
+
+        base_voice_preferences = {
+            'en-IN': 'anushka',
+            'hi-IN': 'manisha',
+            'bn-IN': 'vidya',
+            'ta-IN': 'vidya',
+            'te-IN': 'arya',
+            'gu-IN': 'manisha',
+            'kn-IN': 'vidya',
+            'ml-IN': 'arya',
+            'mr-IN': 'manisha',
+            'pa-IN': 'karun',
+            'od-IN': 'hitesh',
+        }
+
+        self.default_voice = os.getenv("SARVAM_VOICE_DEFAULT", "anushka")
+        self.indic_voice_default = os.getenv("SARVAM_VOICE_INDIC_DEFAULT", "vidya")
+        self.voice_preferences = {}
+        for code, fallback in base_voice_preferences.items():
+            env_key = f"SARVAM_VOICE_{code.replace('-', '_').upper()}"
+            env_value = os.getenv(env_key)
+            if env_value:
+                self.voice_preferences[code] = env_value
+            else:
+                if code.startswith("en"):
+                    self.voice_preferences[code] = self.default_voice
+                else:
+                    self.voice_preferences[code] = fallback or self.indic_voice_default
+        # Ensure English fallback always exists
+        self.voice_preferences.setdefault('en-IN', self.default_voice)
+
+    def _select_voice(self, lang_code: str) -> str:
+        """Pick a Sarvam speaker tuned for the requested language, with env overrides."""
+        if not lang_code:
+            return self.default_voice
+
+        # Direct mapping on normalized language code
+        if lang_code in self.voice_preferences:
+            return self.voice_preferences[lang_code]
+
+        # Allow simple overrides like SARVAM_VOICE_HI
+        short_key = lang_code.split('-')[0].upper()
+        env_short = os.getenv(f"SARVAM_VOICE_{short_key}")
+        if env_short:
+            return env_short
+
+        # Attempt prefix match from existing preferences (hi-IN -> hi, etc.)
+        for code, speaker in self.voice_preferences.items():
+            if code.split('-')[0] == lang_code.split('-')[0]:
+                return speaker
+
+        # Fallback: use Indic default for non-English languages
+        if not lang_code.lower().startswith('en'):
+            return self.indic_voice_default
+
+        return self.default_voice
 
     def _normalize_language_code(self, lang: str) -> str:
         """Convert language code to proper BCP-47 format expected by Sarvam API"""
@@ -84,10 +141,13 @@ class SarvamHandler:
         logger.tts.info(f"🔁 Starting text-to-speech for: {text} in {lang}")
 
         try:
+            lang_code = self._normalize_language_code(lang)
+            speaker = self._select_voice(lang_code)
+
             response = self.client.text_to_speech.convert(
                 text=text,
-                target_language_code=lang,
-                speaker="anushka",
+                target_language_code=lang_code,
+                speaker=speaker,
                 model="bulbul:v2"
             )
             audio_base64 = response.audios[0] if response.audios else None
@@ -130,10 +190,11 @@ class SarvamHandler:
         try:
             # Normalize language code to BCP-47 format
             lang_code = self._normalize_language_code(lang)
+            speaker = self._select_voice(lang_code)
             
             # Check if translation is needed
             if not self._is_text_in_target_language(text, lang_code):
-                logger.tts.info(f"� Text needs translation to {lang_code}")
+                logger.tts.info(f"🌐 Text needs translation to {lang_code}")
                 try:
                     response = self.client.translate.translate(
                         input=text,
@@ -165,7 +226,7 @@ class SarvamHandler:
                 text=translated_text,
                 target_language_code=lang_code,
                 model="bulbul:v2",
-                speaker="anushka",  # Compatible speaker for bulbul:v2
+                speaker=speaker,
                 pitch=1.0,        # Natural pitch
                 pace=1.0,         # Natural speaking pace
                 loudness=1.0,     # Natural volume
@@ -243,12 +304,13 @@ class SarvamHandler:
         try:
             # Normalize language code to BCP-47 format
             lang_code = self._normalize_language_code(lang)
+            speaker = self._select_voice(lang_code)
             
             logger.tts.info("🎤 Generating direct TTS audio...")
             response = self.client.text_to_speech.convert(
                 text=text,
                 target_language_code=lang_code,
-                speaker="anushka",  # Compatible speaker for bulbul:v2
+                speaker=speaker,  # Compatible speaker for bulbul:v2
                 pitch=0.0,        # Natural pitch
                 pace=1.0,         # Natural pace  
                 loudness=1.0,     # Natural loudness
@@ -359,7 +421,7 @@ class SarvamHandler:
             # Configure TTS stream
             await ws.configure(
                 target_language_code="en-IN",
-                speaker="anushka"
+                speaker=self._select_voice("en-IN")
             )
 
             # Send text for conversion

@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS customers (
     timezone VARCHAR(50) DEFAULT 'Asia/Kolkata',
     
     -- Account Status
-    status customer_status_enum DEFAULT 'active',
+    status VARCHAR(50) DEFAULT 'not_initiated',
+    call_status VARCHAR(50) DEFAULT 'not_initiated',
     kyc_verified BOOLEAN DEFAULT FALSE,
     consent_given BOOLEAN DEFAULT FALSE,
     do_not_call BOOLEAN DEFAULT FALSE,

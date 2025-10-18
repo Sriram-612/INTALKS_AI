@@ -82,7 +82,7 @@ class CallManagementService:
             print(f"✅ [CHECKPOINT] Found customer: {customer.full_name} ({customer.primary_phone})")
             
             # Update customer call status to 'initiated'
-            update_customer_call_status(session, customer_id, CallStatus.INITIATED)
+            update_customer_call_status(session, customer_id, CallStatus.INITIATED, call_attempt=True)
 
             # Generate temporary call ID (before Exotel assigns SID)
             temp_call_id = f"temp_call_{uuid.uuid4().hex[:12]}"
@@ -136,7 +136,7 @@ class CallManagementService:
                         'call_sid': call_sid,
                         'customer_id': customer.id,
                         'to_number': customer.primary_phone,
-                        'status': 'initiated',
+                        'status': CallStatus.CALLING,
                         'metadata': {'temp_call_id': temp_call_id}
                     }
                     call_session = create_call_session(session, call_data)
@@ -146,7 +146,7 @@ class CallManagementService:
                     print(f"⚠️ [WARNING] Failed to create call session in DB: {db_error}")
                     # Continue anyway, don't fail the entire call
                 
-                return {
+                result = {
                     'success': True,
                     'message': f'Call triggered successfully for {customer.full_name}',
                     'call_sid': exotel_response.get('call_sid'),  # Return actual call_sid or None
@@ -155,8 +155,17 @@ class CallManagementService:
                     'phone_number': customer.primary_phone,
                     'warning': exotel_response.get('warning')  # Include any warnings
                 }
+
+                self.redis_manager.update_call_status(
+                    call_sid,
+                    CallStatus.CALLING,
+                    "Call ringing customer"
+                )
+                return result
             else:
                 print(f"❌ [CHECKPOINT] Failed to trigger Exotel call for temp_call_id: {temp_call_id}. Error: {exotel_response.get('error')}")
+                update_customer_call_status(session, customer_id, CallStatus.FAILED, call_attempt=True)
+                self.redis_manager.update_call_status(temp_call_id, CallStatus.FAILED, "Call failed to start")
                 return {
                     'success': False,
                     'error': f"Failed to trigger call: {exotel_response.get('error')}",
@@ -184,10 +193,10 @@ class CallManagementService:
         """Fetch call_status for given customer ids from Postgres using pool"""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT id, call_status FROM customers WHERE id = ANY($1)",
+                "SELECT id, status FROM customers WHERE id = ANY($1)",
                 ids
             )
-            return {str(row["id"]): row["call_status"] for row in rows}
+            return {str(row["id"]): row["status"] for row in rows}
 
     
     async def trigger_bulk_calls(self, customer_ids: List[str], websocket_id: str = None) -> Dict[str, Any]:
@@ -289,33 +298,61 @@ class CallManagementService:
         try:
             # Map Exotel status to our status
             status_mapping = {
-                'ringing': CallStatus.RINGING,
-                'in-progress': CallStatus.IN_PROGRESS,
-                'completed': CallStatus.COMPLETED,
+                'ringing': CallStatus.CALLING,
+                'answered': CallStatus.CALL_IN_PROGRESS,
+                'in-progress': CallStatus.CALL_IN_PROGRESS,
+                'in_progress': CallStatus.CALL_IN_PROGRESS,
+                'completed': CallStatus.CALL_COMPLETED,
+                'hangup': CallStatus.CALL_COMPLETED,
                 'failed': CallStatus.FAILED,
-                'busy': CallStatus.BUSY,
-                'no-answer': CallStatus.NO_ANSWER,
-                'canceled': CallStatus.DISCONNECTED
+                'busy': CallStatus.DISCONNECTED,
+                'no-answer': CallStatus.DISCONNECTED,
+                'no_answer': CallStatus.DISCONNECTED,
+                'canceled': CallStatus.DISCONNECTED,
+                'cancelled': CallStatus.DISCONNECTED,
+                'agent_transfer': CallStatus.CALL_IN_PROGRESS
             }
             
-            mapped_status = status_mapping.get(call_status, call_status)
-            
+            mapped_status = status_mapping.get(call_status, None)
+            status_messages = {
+                CallStatus.CALLING: "Call ringing customer",
+                CallStatus.CALL_IN_PROGRESS: "Call in progress",
+                CallStatus.CALL_COMPLETED: "Call completed",
+                CallStatus.DISCONNECTED: "Call disconnected",
+                CallStatus.FAILED: "Call failed",
+                CallStatus.AGENT_TRANSFER: "Call transferred to agent"
+            }
+
+            call_session = get_call_session_by_sid(session, call_sid)
+            if mapped_status is None:
+                current_status = call_session.status if call_session else None
+                if current_status in {CallStatus.CALLING, CallStatus.CALL_IN_PROGRESS, None}:
+                    mapped_status = CallStatus.DISCONNECTED
+                    status_message = f"Call disconnected ({call_status or 'unknown'})"
+                else:
+                    mapped_status = CallStatus.FAILED
+                    status_message = f"Call failed ({call_status or 'unknown'})"
+            else:
+                status_message = status_messages.get(mapped_status, f"Call status: {mapped_status}")
+
             # Update Redis
-            self.redis_manager.update_call_status(call_sid, mapped_status, 
-                                                f"Exotel webhook: {call_status}", webhook_data)
+            self.redis_manager.update_call_status(call_sid, mapped_status, status_message, webhook_data)
             
             # Update Database
-            update_call_status(session, call_sid, mapped_status, 
-                             f"Exotel webhook: {call_status}", webhook_data)
+            update_call_status(session, call_sid, mapped_status, status_message, webhook_data)
+            
+            if call_session and call_session.customer_id:
+                update_customer_call_status(session, str(call_session.customer_id), mapped_status, call_attempt=True)
             
             # If call ended, update end time and duration
-            if mapped_status in [CallStatus.COMPLETED, CallStatus.FAILED, CallStatus.DISCONNECTED, CallStatus.NO_ANSWER]:
-                call_session = get_call_session_by_sid(session, call_sid)
+            if mapped_status in [CallStatus.CALL_COMPLETED, CallStatus.FAILED, CallStatus.DISCONNECTED]:
                 if call_session:
                     call_session.end_time = datetime.utcnow()
                     if webhook_data.get('CallDuration'):
                         call_session.duration = int(webhook_data['CallDuration'])
                     session.commit()
+            else:
+                session.commit()
             
             return {'success': True, 'status': mapped_status}
             

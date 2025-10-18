@@ -835,3 +835,47 @@ Please retry in 27.870764545s. [violations {
 2025-10-11 11:42:15 | ERROR    | voice_assistant.errors | run_voice_session:1622 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
 2025-10-11 11:50:44 | ERROR    | voice_assistant.errors | run_voice_session:1609 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
 2025-10-11 11:50:45 | ERROR    | voice_assistant.errors | run_voice_session:1622 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-12 19:09:39 | ERROR    | voice_assistant.errors | run_voice_session:1609 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-12 19:09:40 | ERROR    | voice_assistant.errors | run_voice_session:1622 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-12 19:19:50 | ERROR    | voice_assistant.errors | run_voice_session:1609 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-12 19:19:51 | ERROR    | voice_assistant.errors | run_voice_session:1622 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-14 09:09:17 | ERROR    | voice_assistant.errors | lifespan:100 | ❌ Database initialization failed
+2025-10-14 09:15:01 | ERROR    | voice_assistant.errors | lifespan:100 | ❌ Database initialization failed
+2025-10-14 09:39:37 | ERROR    | voice_assistant.errors | run_voice_session:1609 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-14 09:39:38 | ERROR    | voice_assistant.errors | run_voice_session:1622 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-14 13:50:09 | ERROR    | voice_assistant.errors | run_voice_session:1622 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-14 13:51:25 | ERROR    | voice_assistant.errors | run_voice_session:1609 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-14 13:51:26 | ERROR    | voice_assistant.errors | run_voice_session:1622 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-14 19:15:39 | ERROR    | voice_assistant.errors | run_voice_session:1609 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-14 19:15:40 | ERROR    | voice_assistant.errors | run_voice_session:1622 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-15 10:30:09 | ERROR    | voice_assistant.errors | run_voice_session:1653 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-15 10:30:09 | ERROR    | voice_assistant.errors | run_voice_session:1653 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-15 10:30:10 | ERROR    | voice_assistant.errors | run_voice_session:1666 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-15 10:30:10 | ERROR    | voice_assistant.errors | run_voice_session:1666 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-15 12:11:37 | ERROR    | voice_assistant.errors | run_voice_session:1666 | Error closing WebSocket: 
+2025-10-15 12:14:00 | ERROR    | voice_assistant.errors | run_voice_session:1653 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-15 12:14:01 | ERROR    | voice_assistant.errors | run_voice_session:1666 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-15 15:19:06 | ERROR    | voice_assistant.errors | run_voice_session:1653 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-15 15:19:07 | ERROR    | voice_assistant.errors | run_voice_session:1666 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-16 19:09:03 | ERROR    | voice_assistant.errors | run_voice_session:1656 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-16 19:09:04 | ERROR    | voice_assistant.errors | run_voice_session:1669 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-16 20:09:14 | ERROR    | voice_assistant.errors | run_voice_session:1657 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-16 20:09:15 | ERROR    | voice_assistant.errors | run_voice_session:1670 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-16 21:02:01 | ERROR    | voice_assistant.errors | run_voice_session:1657 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-16 21:02:02 | ERROR    | voice_assistant.errors | run_voice_session:1670 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-16 21:04:04 | ERROR    | voice_assistant.errors | run_voice_session:1657 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-16 21:04:05 | ERROR    | voice_assistant.errors | run_voice_session:1670 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-16 21:07:52 | ERROR    | voice_assistant.errors | run_voice_session:1657 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-16 21:07:53 | ERROR    | voice_assistant.errors | run_voice_session:1670 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-17 09:17:20 | ERROR    | voice_assistant.errors | run_voice_session:1657 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-17 09:17:21 | ERROR    | voice_assistant.errors | run_voice_session:1670 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-17 10:23:00 | ERROR    | voice_assistant.errors | run_voice_session:1657 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-17 10:23:01 | ERROR    | voice_assistant.errors | run_voice_session:1670 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-17 19:14:53 | ERROR    | voice_assistant.errors | run_voice_session:1657 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-17 19:14:54 | ERROR    | voice_assistant.errors | run_voice_session:1670 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-17 19:17:44 | ERROR    | voice_assistant.errors | run_voice_session:1657 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-17 19:17:45 | ERROR    | voice_assistant.errors | run_voice_session:1670 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-17 19:19:12 | ERROR    | voice_assistant.errors | run_voice_session:1657 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-17 19:19:13 | ERROR    | voice_assistant.errors | run_voice_session:1670 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-18 19:17:08 | ERROR    | voice_assistant.errors | run_voice_session:1657 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-18 19:17:09 | ERROR    | voice_assistant.errors | run_voice_session:1670 | Error closing WebSocket: Cannot call "send" once a close message has been sent.

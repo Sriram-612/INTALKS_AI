@@ -11,7 +11,7 @@ import io
 import os
 import json
 import httpx
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Tuple
 from pydub import AudioSegment
 from sarvamai import SarvamAI
 from sarvamai import AsyncSarvamAI, AudioOutput
@@ -58,6 +58,56 @@ class ProductionSarvamHandler:
             'or': 'od-IN',
             'pa': 'pa-IN'
         }
+
+        base_voice_preferences = {
+            'en-IN': 'anushka',
+            'hi-IN': 'manisha',
+            'bn-IN': 'vidya',
+            'ta-IN': 'vidya',
+            'te-IN': 'arya',
+            'gu-IN': 'manisha',
+            'kn-IN': 'vidya',
+            'ml-IN': 'arya',
+            'mr-IN': 'manisha',
+            'pa-IN': 'karun',
+            'od-IN': 'hitesh',
+        }
+        self.default_voice = os.getenv("SARVAM_VOICE_DEFAULT", "anushka")
+        self.indic_voice_default = os.getenv("SARVAM_VOICE_INDIC_DEFAULT", "vidya")
+        self.voice_preferences: Dict[str, str] = {}
+        for code, fallback in base_voice_preferences.items():
+            env_key = f"SARVAM_VOICE_{code.replace('-', '_').upper()}"
+            env_value = os.getenv(env_key)
+            if env_value:
+                self.voice_preferences[code] = env_value
+            else:
+                if code.startswith("en"):
+                    self.voice_preferences[code] = self.default_voice
+                else:
+                    self.voice_preferences[code] = fallback or self.indic_voice_default
+        self.voice_preferences.setdefault('en-IN', self.default_voice)
+
+    def _select_voice(self, lang_code: str) -> str:
+        """Return the most appropriate Sarvam speaker for the given language."""
+        if not lang_code:
+            return self.default_voice
+
+        if lang_code in self.voice_preferences:
+            return self.voice_preferences[lang_code]
+
+        short_code = lang_code.split('-')[0].upper()
+        env_short = os.getenv(f"SARVAM_VOICE_{short_code}")
+        if env_short:
+            return env_short
+
+        for code, speaker in self.voice_preferences.items():
+            if code.split('-')[0] == lang_code.split('-')[0]:
+                return speaker
+
+        if not lang_code.lower().startswith('en'):
+            return self.indic_voice_default
+
+        return self.default_voice
 
     def _normalize_language_code(self, lang: str) -> str:
         """Normalize language code to proper BCP-47 format"""
@@ -260,7 +310,7 @@ class ProductionSarvamHandler:
             
             # Check if translation is needed
             if not self._is_text_in_target_language(text, lang_code):
-                logger.tts.info(f"� Text needs translation to {lang_code}")
+                logger.tts.info(f"🌐 Text needs translation to {lang_code}")
                 try:
                     response = self.client.translate.translate(
                         input=text,
@@ -292,7 +342,7 @@ class ProductionSarvamHandler:
                 text=translated_text,
                 target_language_code=lang_code,
                 model="bulbul:v2",
-                speaker="anushka",  # Compatible speaker for bulbul:v2
+                speaker=self._select_voice(lang_code),  # Compatible speaker for bulbul:v2
                 pitch=1.0,        # Natural pitch
                 pace=1.0,         # Natural speaking pace
                 loudness=1.0,     # Natural volume
@@ -460,7 +510,7 @@ class ProductionSarvamHandler:
             response = self.client.text_to_speech.convert(
                 text=text,
                 target_language_code=normalized_lang,
-                speaker="anushka",  # Compatible speaker for bulbul:v2
+                speaker=self._select_voice(normalized_lang),  # Compatible speaker for bulbul:v2
                 model="bulbul:v2",
                 enable_preprocessing=True
             )
@@ -531,26 +581,6 @@ class ProductionSarvamHandler:
             audio.export(wav_path, format="wav")
         return wav_path
 
-    def _transcribe_audio(self, wav_path: str, language_code: str) -> Any:
-        """Helper to invoke Sarvam STT with the desired language code."""
-        with open(wav_path, "rb") as wav_file:
-            return self.client.speech_to_text.transcribe(
-                file=wav_file,
-                model="saarika:v2.5",
-                language_code=language_code
-            )
-
-    @staticmethod
-    def _looks_like_english(text: str) -> bool:
-        """Heuristic to decide if transcript is predominantly English (Latin script)."""
-        if not text:
-            return False
-        total_letters = sum(1 for ch in text if ch.isalpha())
-        if total_letters == 0:
-            return False
-        latin_letters = sum(1 for ch in text if ch.isalpha() and ch.isascii())
-        return (latin_letters / total_letters) >= 0.6
-
     async def transcribe_from_payload(self, audio_buffer: bytes) -> str:
         logger.tts.info("🎙️ Converting SLIN base64 to WAV")
 
@@ -564,45 +594,23 @@ class ProductionSarvamHandler:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             audio.export(f.name, format="wav")
             wav_path = f.name
-
-        english_transcript = ""
-        fallback_transcript = ""
-        fallback_language = None
-
+        logger.tts.info("🚀 Sending WAV to Sarvam API")
+        # Call Sarvam REST API directly
         try:
-            logger.tts.info("🚀 Sending WAV to Sarvam API (forced English)")
-            english_response = self._transcribe_audio(wav_path, "en-IN")
-            english_transcript = (english_response.transcript or "").strip()
-            logger.tts.info(f"📝 English transcript candidate: '{english_transcript}'")
-
-            if english_transcript:
-                detected_lang = await self.detect_language_from_text(english_transcript)
-            else:
-                detected_lang = "en-IN"
-
-            if self._looks_like_english(english_transcript) and detected_lang.startswith("en"):
-                logger.tts.info("✅ English transcript selected based on heuristic and language detection")
-                return english_transcript
-
-            logger.tts.info(
-                f"ℹ️ English transcript not dominant (lang_detected={detected_lang}); retrying with auto language detection"
-            )
-            fallback_response = self._transcribe_audio(wav_path, "unknown")
-            fallback_transcript = (fallback_response.transcript or "").strip()
-            fallback_language = getattr(fallback_response, "language_code", None)
-            logger.tts.info(
-                f"📝 Fallback transcript: '{fallback_transcript}' (lang={fallback_language})"
-            )
-
-            if fallback_transcript:
-                return fallback_transcript
-
-            return english_transcript
+            with open(wav_path, "rb") as wav_file:
+                response = self.client.speech_to_text.transcribe(
+                    file=wav_file,
+                    model="saarika:v2.5",
+                    language_code="unknown"  # Let API detect spoken language
+                )
         finally:
             try:
                 os.unlink(wav_path)
             except OSError as cleanup_err:
                 logger.tts.warning(f"⚠️ Failed to delete temp wav file {wav_path}: {cleanup_err}")
+
+        logger.tts.info(f"📝 Transcript received: {response.transcript}")
+        return response.transcript
 
     # Additional legacy TTS methods for compatibility
     async def synthesize_tts_direct(self, text: str, lang: str) -> bytes:

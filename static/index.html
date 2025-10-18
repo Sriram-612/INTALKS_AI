@@ -196,11 +196,13 @@
         }
 
         .status-ready { background: #d4edda; color: #155724; }
+        .status-not_initiated { background: #e9ecef; color: #495057; }
         .status-calling { background: #fff3cd; color: #856404; }
-        .status-in-progress { background: #cce5ff; color: #004085; }
-        .status-completed { background: #d1ecf1; color: #0c5460; }
+        .status-call_in_progress { background: #cce5ff; color: #004085; }
+        .status-call_completed { background: #d1ecf1; color: #0c5460; }
+        .status-disconnected { background: #ffe8d6; color: #8c2f00; }
         .status-failed { background: #f8d7da; color: #721c24; }
-        .status-agent-transfer { background: #e2e3e5; color: #383d41; }
+        .status-agent_transfer { background: #e2e3e5; color: #383d41; }
 
         /* Upload Date Badge */
         .upload-date-badge {
@@ -806,11 +808,12 @@
             text-transform: uppercase;
         }
 
-        .status-initiated { background: #e3f2fd; color: #1976d2; }
+        .status-not_initiated { background: #e9ecef; color: #495057; }
         .status-call_in_progress { background: #fff3e0; color: #f57c00; }
         .status-call_completed { background: #e8f5e8; color: #2e7d32; }
-        .status-call_failed { background: #ffebee; color: #c62828; }
-        .status-ringing { background: #f3e5f5; color: #7b1fa2; }
+        .status-calling { background: #fff3cd; color: #856404; }
+        .status-disconnected { background: #ffe8d6; color: #8c2f00; }
+        .status-failed { background: #f8d7da; color: #721c24; }
 
         /* Call Details Modal Styles */
         .call-info {
@@ -1487,7 +1490,7 @@
         let isInitialLoad = true;
 
         // Auto-refresh settings
-        const AUTO_REFRESH_INTERVAL = 30000; // 30 seconds
+        const AUTO_REFRESH_INTERVAL = 1000; // 1 second for status refresh
         const DATA_REFRESH_INTERVAL = 60000;  // 1 minute for full data refresh
 
         // Initialize dashboard
@@ -1836,7 +1839,11 @@
                     throw new Error('Invalid response format: expected array of customers');
                 }
                 
-                customers = responseData;
+                customers = responseData.map(c => ({
+                    ...c,
+                    status: (c.status || c.call_status || 'ready').toLowerCase(),
+                    call_status: (c.call_status || c.status || 'ready').toLowerCase()
+                }));
                 filteredCustomers = [...customers];
                 
                 // Clear any existing selections since data has been refreshed
@@ -2289,7 +2296,7 @@
         async function loadCallStatuses(isInitialLoad = false) {
             try {
                 if (!isInitialLoad) {
-                    logActivity('📞 Loading call status data...');
+                    console.debug('📞 Loading call status data...');
                 } else {
                     console.log('📞 Initial load: Loading call status data...');
                 }
@@ -2307,7 +2314,11 @@
                 updateCallStatusStats(data.statuses);
                 populateCallStatusTable(data.statuses);
                 
-                logActivity(`✅ Loaded ${data.statuses.length} call status updates`);
+                if (isInitialLoad) {
+                    logActivity(`✅ Loaded ${data.statuses.length} call status updates`);
+                } else {
+                    console.debug(`✅ Loaded ${data.statuses.length} call status updates`);
+                }
                 
             } catch (error) {
                 console.error('Error loading call statuses:', error);
@@ -2333,10 +2344,12 @@
             // Calculate statistics
             const totalCalls = latestStatuses.length;
             const inProgressCalls = latestStatuses.filter(s => 
-                s.status === 'call_in_progress' || s.status === 'ringing' || s.status === 'initiated'
+                ['call_in_progress', 'calling', 'agent_transfer'].includes((s.status || '').toLowerCase())
             ).length;
-            const completedCalls = latestStatuses.filter(s => s.status === 'call_completed').length;
-            const failedCalls = latestStatuses.filter(s => s.status === 'call_failed').length;
+            const completedCalls = latestStatuses.filter(s => (s.status || '').toLowerCase() === 'call_completed').length;
+            const failedCalls = latestStatuses.filter(s => 
+                ['failed', 'disconnected'].includes((s.status || '').toLowerCase())
+            ).length;
             
             // Update DOM elements
             document.getElementById('totalCallsStat').textContent = totalCalls;
@@ -2375,7 +2388,9 @@
                     second: '2-digit'
                 });
                 
-                const statusClass = status.status.toLowerCase().replace(/_/g, '_');
+                const rawStatus = (status.status || '').toLowerCase();
+                const statusClass = mapCallStatus(rawStatus);
+                const statusLabel = formatStatusLabel(rawStatus);
                 
                 return `
                     <tr>
@@ -2388,7 +2403,7 @@
                         </td>
                         <td>
                             <span class="call-status-badge status-${statusClass}">
-                                ${status.status.replace(/_/g, ' ')}
+                                ${statusLabel}
                             </span>
                         </td>
                         <td title="${status.message || 'No message'}">
@@ -2451,14 +2466,16 @@
                             ${callData.statuses.map(status => {
                                 const timestamp = new Date(status.timestamp);
                                 const formattedTime = timestamp.toLocaleString('en-IN');
-                                const statusClass = status.status.toLowerCase().replace(/_/g, '_');
+                                const rawStatus = (status.status || '').toLowerCase();
+                                const statusClass = mapCallStatus(rawStatus);
+                                const statusLabel = formatStatusLabel(rawStatus);
                                 
                                 return `
                                     <div class="status-timeline-item">
                                         <div class="status-timestamp">${formattedTime}</div>
                                         <div class="status-info">
                                             <span class="call-status-badge status-${statusClass}">
-                                                ${status.status.replace(/_/g, ' ')}
+                                                ${statusLabel}
                                             </span>
                                             <div class="status-message">${status.message || 'No message'}</div>
                                         </div>
@@ -2488,7 +2505,7 @@
                 logActivity('⏸️ Auto refresh stopped');
             } else {
                 // Start auto refresh
-                autoRefreshInterval = setInterval(loadCallStatuses, 10000); // Every 10 seconds
+                autoRefreshInterval = setInterval(loadCallStatuses, 1000); // Every 1 second
                 isAutoRefresh = true;
                 button.classList.add('active');
                 text.textContent = '⏸️ Stop Auto';
@@ -2574,8 +2591,7 @@
 
                 // Call status filter
                 if (callStatusFilter) {
-                    // Map status values
-                    const customerStatus = mapCallStatus(customer.call_status || 'ready');
+                    const customerStatus = mapCallStatus(customer.status || customer.call_status || 'ready');
                     if (customerStatus !== callStatusFilter) return false;
                 }
 
@@ -2636,22 +2652,39 @@
 
         // Map call status for display
         function mapCallStatus(status) {
+            const normalized = (status || '').toLowerCase();
             const statusMap = {
                 'ready': 'ready',
-                'not_initiated': 'ready',
-                'calling': 'calling',
+                'not_initiated': 'not_initiated',
+                'not_initialized': 'not_initiated',
                 'initiated': 'calling',
                 'ringing': 'calling',
-                'call_in_progress': 'in-progress',
-                'in_progress': 'in-progress',
-                'call_completed': 'completed',
-                'completed': 'completed',
-                'call_failed': 'failed',
+                'calling': 'calling',
+                'queued': 'calling',
+                'scheduled': 'ready',
+                'call_in_progress': 'call_in_progress',
+                'in_progress': 'call_in_progress',
+                'answered': 'call_in_progress',
+                'call_completed': 'call_completed',
+                'completed': 'call_completed',
+                'disconnected': 'disconnected',
+                'busy': 'disconnected',
+                'no_answer': 'disconnected',
+                'no-answer': 'disconnected',
                 'failed': 'failed',
-                'agent_transfer': 'agent-transfer',
-                'disconnected': 'failed'
+                'call_failed': 'failed',
+                'agent_transfer': 'agent_transfer'
             };
-            return statusMap[status] || 'ready';
+            return statusMap[normalized] || 'ready';
+        }
+
+        function formatStatusLabel(status) {
+            if (!status) return 'Ready';
+            return status
+                .replace(/[-_]/g, ' ')
+                .split(' ')
+                .map(word => word ? word.charAt(0).toUpperCase() + word.slice(1) : '')
+                .join(' ');
         }
 
         // Render customer table
@@ -2690,10 +2723,12 @@
                 
                 const loan = customer.loans[0] || {};
                 const uploadDate = getUploadDateBadge(customer.first_uploaded_at);
-                const callStatus = mapCallStatus(customer.call_status || 'ready');
+                const rawStatus = (customer.status || customer.call_status || 'ready').toLowerCase();
+                const callStatusClass = mapCallStatus(rawStatus);
+                const callStatusLabel = formatStatusLabel(rawStatus);
                 
                 return `
-                    <tr class="customer-row ${callStatus}" data-customer-id="${customer.id}">
+                    <tr class="customer-row ${callStatusClass}" data-customer-id="${customer.id}">
                         <td>
                             <input type="checkbox" value="${customer.id}" 
                                    ${selectedCustomers.has(customer.id) ? 'checked' : ''}
@@ -2724,8 +2759,8 @@
                         <td>₹${formatCurrency(loan.last_paid_amount || 0)}</td>
                         <td>₹${formatCurrency(loan.due_amount || 0)}</td>
                         <td>
-                            <span class="status-badge status-${callStatus}">
-                                ${callStatus.replace('-', ' ')}
+                            <span class="status-badge status-${callStatusClass}">
+                                ${callStatusLabel}
                             </span>
                         </td>
                         <td>
@@ -2955,16 +2990,19 @@
             }).length;
             
             const statusCounts = customers.reduce((acc, customer) => {
-                const status = mapCallStatus(customer.call_status || 'ready');
-                acc[status] = (acc[status] || 0) + 1;
+                const rawStatus = (customer.status || customer.call_status || 'ready').toLowerCase();
+                const mappedStatus = mapCallStatus(rawStatus);
+                acc[mappedStatus] = (acc[mappedStatus] || 0) + 1;
                 return acc;
             }, {});
 
             document.getElementById('totalCustomersStat').textContent = totalCustomers;
             document.getElementById('todayUploadsStat').textContent = todayUploads;
-            document.getElementById('readyToCallStat').textContent = statusCounts.ready || 0;
-            document.getElementById('activeCallsStat').textContent = statusCounts['in-progress'] || 0;
-            document.getElementById('completedCallsStat').textContent = statusCounts.completed || 0;
+            const readyCount = (statusCounts.ready || 0) + (statusCounts.not_initiated || 0);
+            document.getElementById('readyToCallStat').textContent = readyCount;
+            const activeCount = (statusCounts.call_in_progress || 0) + (statusCounts.calling || 0) + (statusCounts.agent_transfer || 0);
+            document.getElementById('activeCallsStat').textContent = activeCount;
+            document.getElementById('completedCallsStat').textContent = statusCounts.call_completed || 0;
             document.getElementById('totalCustomersDisplay').textContent = `Total: ${totalCustomers}`;
         }
 
@@ -3302,7 +3340,7 @@
                     loan.employee_id || '',
                     loan.employee_contact_number || '',
                     customer.first_uploaded_at,
-                    customer.call_status || 'ready'
+                    (customer.status || customer.call_status || 'ready')
                 ];
             });
             
@@ -3383,7 +3421,7 @@
             }, DATA_REFRESH_INTERVAL);
             
             // Show notification about auto-refresh
-            showToast('Auto-refresh enabled: Data will update every minute', 'info', 4000);
+            showToast('Auto-refresh enabled: Call statuses refresh every second and data every minute', 'info', 4000);
         }
 
         function showLoading(show) {
@@ -3469,24 +3507,22 @@
         }
 
         function setupAutoRefresh() {
-            // Update status every 30 seconds
+            // Update status display every second
             refreshInterval = setInterval(function() {
-                const refreshCount = parseInt(document.getElementById('statusRefreshCount').textContent.split(': ')[1] || '0');
-                document.getElementById('statusRefreshCount').textContent = `Refreshes: ${refreshCount + 1}`;
+                const refreshCounterEl = document.getElementById('statusRefreshCount');
+                const currentCount = parseInt(refreshCounterEl.textContent.split(': ')[1] || '0');
+                const nextCount = currentCount + 1;
+                refreshCounterEl.textContent = `Refreshes: ${nextCount}`;
                 
-                // Auto-refresh customer data every 5 minutes (300 seconds)
-                if (refreshCount > 0 && refreshCount % 10 === 0) {
-                    logActivity('🔄 Auto-refreshing customer data from database...');
-                    loadCustomerData(false); // Silent refresh
-                    
-                    // Also refresh batch data every 5 minutes
+                if (nextCount % 60 === 0) { // Roughly once per minute
+                    console.debug('🔄 Auto-refreshing dashboard data...');
+                    loadCustomerData(false);
                     loadBatchDetails();
                 } else {
-                    // Just update statistics and timestamp
                     document.getElementById('lastStatusUpdate').textContent = `Last update: ${getCurrentISTTime()} IST`;
                     updateStatistics();
                 }
-            }, 30000);
+            }, 1000);
             
             // Initial data load
             logActivity('🚀 Starting initial data load from database...');
@@ -3496,10 +3532,13 @@
         function updateCustomerCallStatus(customerId, status, message) {
             const customer = customers.find(c => c.id === customerId);
             if (customer) {
-                customer.call_status = status;
+                const normalizedStatus = (status || 'ready').toLowerCase();
+                customer.call_status = normalizedStatus;
+                customer.status = normalizedStatus;
                 renderCustomerTable();
                 updateStatistics();
-                logActivity(`Customer ${customer.full_name}: ${message || status}`);
+                const statusLabel = formatStatusLabel(normalizedStatus);
+                logActivity(`Customer ${customer.full_name}: ${message || statusLabel}`);
             }
         }
 

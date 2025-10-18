@@ -31,6 +31,19 @@ CHUNK_DURATION = 3.5  # seconds
 
 q = queue.Queue()
 
+DEFAULT_VOICE = os.getenv("SARVAM_VOICE_DEFAULT", "anushka")
+INDIC_DEFAULT_VOICE = os.getenv("SARVAM_VOICE_INDIC_DEFAULT", "vidya")
+VOICE_PREFERENCES = {
+    "en": os.getenv("SARVAM_VOICE_EN", DEFAULT_VOICE),
+    "hi": os.getenv("SARVAM_VOICE_HI", "manisha"),
+    "ta": os.getenv("SARVAM_VOICE_TA", "vidya"),
+    "te": os.getenv("SARVAM_VOICE_TE", "arya"),
+    "ml": os.getenv("SARVAM_VOICE_ML", "arya"),
+    "bn": os.getenv("SARVAM_VOICE_BN", "vidya"),
+    "mr": os.getenv("SARVAM_VOICE_MR", "manisha"),
+    "pa": os.getenv("SARVAM_VOICE_PA", "karun"),
+}
+
 GREETING_TEMPLATE = {
     "en": "Hello, this is Priya calling on behalf of Zrosis Bank. Am I speaking with Mr. {name}?",
     "hi": "नमस्ते, मैं प्रिय हूं और ज़्रोसिस बैंक की ओर से बात कर रही हूं। क्या मैं श्री/सुश्री {name} से बात कर रही हूं?",
@@ -59,13 +72,29 @@ def save_wav(array):
     wav_io.seek(0)
     return wav_io
 
-def speak(text: str, language_code: str = "unknown", speaker: str = "anushka"):
+def resolve_speaker(language_code: str) -> str:
+    if not language_code:
+        return DEFAULT_VOICE
+    normalized = language_code.lower()
+    full_env = os.getenv(f"SARVAM_VOICE_{normalized.replace('-', '_').upper()}")
+    if full_env:
+        return full_env
+    prefix = lang_to_prefix(normalized)
+    short_env = os.getenv(f"SARVAM_VOICE_{prefix.upper()}")
+    if short_env:
+        return short_env
+    if normalized.startswith("en"):
+        return VOICE_PREFERENCES.get("en", DEFAULT_VOICE)
+    return VOICE_PREFERENCES.get(prefix, INDIC_DEFAULT_VOICE)
+
+def speak(text: str, language_code: str = "en-IN", speaker: str = None):
+    selected_speaker = speaker or resolve_speaker(language_code)
     print(f"🔊 Speaking ({language_code}): {text}")
     resp = client.text_to_speech.convert(
         text=text,
         target_language_code=language_code,
         model="bulbul:v2",
-        speaker=speaker
+        speaker=selected_speaker
     )
     audio_b64 = resp.audios[0]
     audio_bytes = base64.b64decode(audio_b64)
@@ -79,6 +108,10 @@ def lang_to_prefix(code):
     if code.startswith("hi"): return "hi"
     if code.startswith("ta"): return "ta"
     if code.startswith("te"): return "te"
+    if code.startswith("ml"): return "ml"
+    if code.startswith("bn"): return "bn"
+    if code.startswith("mr"): return "mr"
+    if code.startswith("pa"): return "pa"
     return "en"
 
 # ---------------------- INTERACTION LOOP ------------------------ #
