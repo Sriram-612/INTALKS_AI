@@ -775,24 +775,53 @@ def create_call_session(session, call_sid: str, customer_id: str, websocket_sess
 
 
 def update_call_status(session, call_sid: str, status: str, message: str = None, extra_data: dict = None) -> Optional[CallSession]:
-    """Update call status and create status update record - backward compatible"""
+    """Update call status and create status update record"""
     try:
-        call_session = session.query(CallSession).filter(CallSession.call_sid == call_sid).first()
+        call_session = get_call_session_by_sid(session, call_sid)
         if call_session:
             # Update main status
-            call_session.status = status
+            normalized_status = (status or CallStatus.CALLING).lower()
+            status_priority = {
+                CallStatus.NOT_INITIATED: 0,
+                "ready": 0,
+                CallStatus.CALLING: 1,
+                CallStatus.CALL_IN_PROGRESS: 2,
+                CallStatus.AGENT_TRANSFER: 2,
+                CallStatus.CALL_COMPLETED: 3,
+                CallStatus.DISCONNECTED: 3,
+                CallStatus.FAILED: 3,
+            }
+
+            current_status = (call_session.status or CallStatus.CALLING).lower()
+            current_priority = status_priority.get(current_status, 0)
+            new_priority = status_priority.get(normalized_status, 0)
+
+            if new_priority < current_priority:
+                print(f"⚠️ Skipping status downgrade for {call_sid}: {current_status} → {normalized_status}")
+                return call_session
+
+            call_session.status = normalized_status
             call_session.updated_at = datetime.utcnow()
+
+            # Sync customer status with latest call session status
+            if call_session.customer:
+                call_session.customer.status = normalized_status
+                if hasattr(call_session.customer, "call_status"):
+                    call_session.customer.call_status = normalized_status
+                # Touch last_contact_date for meaningful statuses
+                if normalized_status not in {"ready", "not_initiated"}:
+                    call_session.customer.last_contact_date = datetime.utcnow()
             
             # Create status update record
             status_update = CallStatusUpdate(
                 call_session_id=call_session.id,
-                status=status,
+                status=normalized_status,
                 message=message,
                 extra_data=extra_data
             )
             session.add(status_update)
             session.commit()
-            print(f"✅ Updated call {call_sid} status to: {status}")
+            print(f"✅ Updated call {call_sid} status to: {normalized_status}")
             return call_session
         else:
             print(f"⚠️ Call session not found: {call_sid}")
@@ -801,6 +830,7 @@ def update_call_status(session, call_sid: str, status: str, message: str = None,
         session.rollback()
         print(f"❌ Error updating call status: {e}")
         return None
+
 
 
 def get_customers_list(session, limit: int = 100, offset: int = 0) -> List[Customer]:
@@ -865,12 +895,17 @@ def update_customer_call_status_by_phone(session, phone: str, status: str) -> bo
         return False
 
 
-def update_customer_call_status(session, customer_id: str, status: str) -> bool:
-    """Update customer call status by customer ID"""
+def update_customer_call_status(session, customer_id: str, status: str, call_attempt: bool = False) -> bool:
+    """Update customer status by customer ID"""
     try:
+        normalized_status = (status or 'ready').lower()
         customer = session.query(Customer).filter(Customer.id == customer_id).first()
         if customer:
-            customer.last_contact_date = datetime.utcnow()
+            customer.status = normalized_status
+            if hasattr(customer, "call_status"):
+                customer.call_status = normalized_status
+            if call_attempt:
+                customer.last_contact_date = datetime.utcnow()
             session.commit()
             return True
         return False

@@ -11,7 +11,7 @@ import io
 import os
 import json
 import httpx
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Tuple
 from pydub import AudioSegment
 from sarvamai import SarvamAI
 from sarvamai import AsyncSarvamAI, AudioOutput
@@ -58,6 +58,56 @@ class ProductionSarvamHandler:
             'or': 'od-IN',
             'pa': 'pa-IN'
         }
+
+        base_voice_preferences = {
+            'en-IN': 'anushka',
+            'hi-IN': 'manisha',
+            'bn-IN': 'vidya',
+            'ta-IN': 'vidya',
+            'te-IN': 'arya',
+            'gu-IN': 'manisha',
+            'kn-IN': 'vidya',
+            'ml-IN': 'arya',
+            'mr-IN': 'manisha',
+            'pa-IN': 'karun',
+            'od-IN': 'hitesh',
+        }
+        self.default_voice = os.getenv("SARVAM_VOICE_DEFAULT", "anushka")
+        self.indic_voice_default = os.getenv("SARVAM_VOICE_INDIC_DEFAULT", "vidya")
+        self.voice_preferences: Dict[str, str] = {}
+        for code, fallback in base_voice_preferences.items():
+            env_key = f"SARVAM_VOICE_{code.replace('-', '_').upper()}"
+            env_value = os.getenv(env_key)
+            if env_value:
+                self.voice_preferences[code] = env_value
+            else:
+                if code.startswith("en"):
+                    self.voice_preferences[code] = self.default_voice
+                else:
+                    self.voice_preferences[code] = fallback or self.indic_voice_default
+        self.voice_preferences.setdefault('en-IN', self.default_voice)
+
+    def _select_voice(self, lang_code: str) -> str:
+        """Return the most appropriate Sarvam speaker for the given language."""
+        if not lang_code:
+            return self.default_voice
+
+        if lang_code in self.voice_preferences:
+            return self.voice_preferences[lang_code]
+
+        short_code = lang_code.split('-')[0].upper()
+        env_short = os.getenv(f"SARVAM_VOICE_{short_code}")
+        if env_short:
+            return env_short
+
+        for code, speaker in self.voice_preferences.items():
+            if code.split('-')[0] == lang_code.split('-')[0]:
+                return speaker
+
+        if not lang_code.lower().startswith('en'):
+            return self.indic_voice_default
+
+        return self.default_voice
 
     def _normalize_language_code(self, lang: str) -> str:
         """Normalize language code to proper BCP-47 format"""
@@ -260,7 +310,7 @@ class ProductionSarvamHandler:
             
             # Check if translation is needed
             if not self._is_text_in_target_language(text, lang_code):
-                logger.tts.info(f"� Text needs translation to {lang_code}")
+                logger.tts.info(f"🌐 Text needs translation to {lang_code}")
                 try:
                     response = self.client.translate.translate(
                         input=text,
@@ -292,7 +342,7 @@ class ProductionSarvamHandler:
                 text=translated_text,
                 target_language_code=lang_code,
                 model="bulbul:v2",
-                speaker="anushka",  # Compatible speaker for bulbul:v2
+                speaker=self._select_voice(lang_code),  # Compatible speaker for bulbul:v2
                 pitch=1.0,        # Natural pitch
                 pace=1.0,         # Natural speaking pace
                 loudness=1.0,     # Natural volume
@@ -318,49 +368,87 @@ class ProductionSarvamHandler:
             else:
                 audio_bytes = audio_data
                 
+            # Step 3: Convert to SLIN format with better error handling
+            try:
+                logger.tts.info("🎧 Converting audio to SLIN format...")
+                
+                # Try direct conversion from bytes first (if it's already PCM)
+                try:
+                    # Check if audio_bytes is already in a usable format
+                    if len(audio_bytes) > 0:
+                        # Try to load directly from bytes
+                        audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
+                        logger.tts.info(f"📊 Direct audio loaded: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
+                        
+                        # Convert to SLIN format (8kHz, mono, 16-bit)
+                        slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+                        final_bytes = slin_audio.raw_data
+                        
+                        logger.tts.info(f"✅ SLIN audio ready: {len(final_bytes)} bytes, 8kHz mono")
+                        return final_bytes
+                        
+                except Exception as direct_error:
+                    logger.tts.info(f"Direct conversion failed, trying temp file method: {direct_error}")
+                    
+                    # Fallback to temp file method with improved cleanup
+                    import tempfile
+                    import os
+                    import time
+                    import gc
+                    
+                    temp_file_path = None
+                    try:
+                        # Create temp file
+                        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                            temp_file_path = temp_file.name
+                            temp_file.write(audio_bytes)
+                            temp_file.flush()
+                        
+                        # Load and convert audio
+                        try:
+                            audio_segment = AudioSegment.from_file(temp_file_path)
+                            logger.tts.info(f"📊 Temp file audio: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
+                        except:
+                            audio_segment = AudioSegment.from_wav(temp_file_path)
+                            logger.tts.info(f"📊 WAV audio loaded: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
+                        
+                        # Convert to SLIN format
+                        slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+                        final_bytes = slin_audio.raw_data
+                        
+                        # Explicitly clean up objects
+                        del audio_segment
+                        del slin_audio
+                        gc.collect()  # Force garbage collection
+                        
+                    finally:
+                        # Clean up temp file with retry mechanism
+                        if temp_file_path and os.path.exists(temp_file_path):
+                            max_retries = 5
+                            for attempt in range(max_retries):
+                                try:
+                                    os.unlink(temp_file_path)
+                                    logger.tts.debug(f"✅ Temp file deleted: {temp_file_path}")
+                                    break
+                                except (PermissionError, OSError) as cleanup_error:
+                                    if attempt < max_retries - 1:
+                                        time.sleep(0.2)  # Wait 200ms before retry
+                                        continue
+                                    else:
+                                        logger.tts.warning(f"⚠️ Could not delete temp file {temp_file_path} after {max_retries} attempts: {cleanup_error}")
+                                        # File will be cleaned up by OS eventually
+                
+                logger.tts.info(f"✅ SLIN audio ready: {len(final_bytes)} bytes, 8kHz mono")
+                return final_bytes
+            
+            except Exception as e:
+                logger.tts.error(f"❌ Audio conversion failed: {e}")
+                import traceback
+                logger.tts.error(f"❌ Conversion traceback: {traceback.format_exc()}")
+                return None
+
         except Exception as e:
             logger.tts.error(f"❌ TTS generation failed: {e}")
-            return None
-
-        # Step 3: Convert to SLIN format with better error handling
-        try:
-            logger.tts.info("🎧 Converting audio to SLIN format...")
-            
-            # Create temporary file to handle audio conversion
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_file.write(audio_bytes)
-                temp_file.flush()
-                
-                # Load audio using pydub with explicit format
-                try:
-                    audio_segment = AudioSegment.from_file(temp_file.name)
-                    logger.tts.info(f"📊 Original audio: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
-                except:
-                    # Try as WAV if MP3 fails
-                    audio_segment = AudioSegment.from_wav(temp_file.name)
-                    logger.tts.info(f"📊 WAV audio loaded: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
-                
-                # Convert to SLIN format (8kHz, mono, 16-bit)
-                slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
-                final_bytes = slin_audio.raw_data
-                
-                # Clean up temp file
-                import os
-                os.unlink(temp_file.name)
-                
-            logger.tts.info(f"✅ SLIN audio ready: {len(final_bytes)} bytes, 8kHz mono")
-            
-            # Validate audio data
-            if len(final_bytes) < 1000:  # Less than ~62ms of audio
-                logger.tts.warning("⚠️ Very short audio generated, may be silence")
-                
-            return final_bytes
-            
-        except Exception as e:
-            logger.tts.error(f"❌ Audio conversion failed: {e}")
-            import traceback
-            logger.tts.error(f"❌ Conversion traceback: {traceback.format_exc()}")
             return None
 
     def _is_text_in_target_language(self, text: str, lang: str) -> bool:
@@ -422,7 +510,7 @@ class ProductionSarvamHandler:
             response = self.client.text_to_speech.convert(
                 text=text,
                 target_language_code=normalized_lang,
-                speaker="anushka",  # Compatible speaker for bulbul:v2
+                speaker=self._select_voice(normalized_lang),  # Compatible speaker for bulbul:v2
                 model="bulbul:v2",
                 enable_preprocessing=True
             )
@@ -508,12 +596,19 @@ class ProductionSarvamHandler:
             wav_path = f.name
         logger.tts.info("🚀 Sending WAV to Sarvam API")
         # Call Sarvam REST API directly
-        with open(wav_path, "rb") as wav_file:
-            response = self.client.speech_to_text.transcribe(
-                file=wav_file,
-                model="saarika:v2.5",
-                language_code="unknown"  # Make sure this matches your subscription
-            )
+        try:
+            with open(wav_path, "rb") as wav_file:
+                response = self.client.speech_to_text.transcribe(
+                    file=wav_file,
+                    model="saarika:v2.5",
+                    language_code="unknown"  # Let API detect spoken language
+                )
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError as cleanup_err:
+                logger.tts.warning(f"⚠️ Failed to delete temp wav file {wav_path}: {cleanup_err}")
+
         logger.tts.info(f"📝 Transcript received: {response.transcript}")
         return response.transcript
 

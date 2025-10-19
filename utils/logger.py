@@ -21,6 +21,7 @@ WEBSOCKET_LOG_FILE = LOGS_DIR / "websocket.log"
 TTS_LOG_FILE = LOGS_DIR / "tts.log"
 DATABASE_LOG_FILE = LOGS_DIR / "database.log"
 CALL_LOG_FILE = LOGS_DIR / "calls.log"
+AUDIO_LOG_FILE = LOGS_DIR / "audio.log"
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter with colors for console output"""
@@ -137,10 +138,11 @@ websocket_logger = setup_logger('voice_assistant.websocket', WEBSOCKET_LOG_FILE)
 tts_logger = setup_logger('voice_assistant.tts', TTS_LOG_FILE)
 database_logger = setup_logger('voice_assistant.database', DATABASE_LOG_FILE)
 call_logger = setup_logger('voice_assistant.calls', CALL_LOG_FILE)
+audio_logger = setup_logger('voice_assistant.audio', AUDIO_LOG_FILE)
 
 # JSON loggers for structured data
-websocket_json_logger = setup_json_logger('websocket', WEBSOCKET_LOG_FILE)
-call_json_logger = setup_json_logger('calls', CALL_LOG_FILE)
+websocket_json_logger = setup_json_logger('voice_assistant.websocket.json', WEBSOCKET_LOG_FILE)
+call_json_logger = setup_json_logger('voice_assistant.calls.json', CALL_LOG_FILE)
 
 class VoiceAssistantLogger:
     """Main logger class for the voice assistant application"""
@@ -152,6 +154,7 @@ class VoiceAssistantLogger:
         self.tts = tts_logger
         self.database = database_logger
         self.call = call_logger
+        self.audio = audio_logger
         self.websocket_json = websocket_json_logger
         self.call_json = call_json_logger
     

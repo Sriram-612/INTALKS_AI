@@ -6,9 +6,7 @@ Handles the complete call lifecycle with database and Redis integration
 import uuid
 import json
 import asyncio
-import io
-import re
-import pandas as pd
+import asyncpg
 import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional, List
@@ -18,15 +16,14 @@ from urllib.parse import urlencode
 from dotenv import load_dotenv
 
 from database.schemas import (
-    DatabaseManager, Customer, CallSession, CallStatusUpdate, FileUpload, Loan,
+    DatabaseManager, Customer, CallSession,
     CallStatus, get_customer_by_phone, create_customer, create_call_session,
-    update_call_status, get_call_session_by_sid, db_manager, create_loan,
-    get_loan_by_external_id, compute_fingerprint
+    update_call_status, get_call_session_by_sid, db_manager,
+    update_customer_call_status
 )
 from utils.redis_session import redis_manager
 from utils.handler_asr import SarvamHandler
 from utils.logger import logger
-from utils.json_encoder import convert_to_json_serializable
 
 load_dotenv()
 
@@ -35,6 +32,8 @@ class CallManagementService:
         self.db_manager = db_manager
         self.redis_manager = redis_manager
         self.sarvam_handler = SarvamHandler(os.getenv("SARVAM_API_KEY"))
+        self.db_url = os.getenv("DATABASE_URL")
+        self.pool: asyncpg.pool.Pool = None
         
         # Exotel configuration
         self.exotel_sid = os.getenv("EXOTEL_SID")
@@ -44,7 +43,13 @@ class CallManagementService:
         self.exotel_flow_app_id = os.getenv("EXOTEL_FLOW_APP_ID")
         self.agent_phone_number = os.getenv("AGENT_PHONE_NUMBER")
         
-    async def upload_and_process_customers(self, file_data: bytes, filename: str, websocket_id: str = None) -> Dict[str, Any]:
+    async def upload_and_process_customers(
+        self,
+        file_data: bytes,
+        filename: str,
+        websocket_id: str = None,
+        uploaded_by: Optional[str] = "dashboard"
+    ) -> Dict[str, Any]:
         """Process uploaded customer file and store in database with date-based tracking"""
         session = self.db_manager.get_session()
         try:
@@ -251,21 +256,27 @@ class CallManagementService:
                 logger.error(f"Customer with ID {customer_id} not found")
                 return {'success': False, 'error': f"Customer with ID {customer_id} not found"}
             
-            logger.info(f"Found customer: {customer.name} ({customer.phone_number})")
+            logger.info(f"✅ [CHECKPOINT] Found customer: {customer.full_name} ({customer.primary_phone})")
+            
+            # Update customer call status to 'initiated'
+            update_customer_call_status(session, customer_id, CallStatus.INITIATED, call_attempt=True)
 
             # Generate temporary call ID (before Exotel assigns SID)
             temp_call_id = f"temp_call_{uuid.uuid4().hex[:12]}"
             
+            # Get the primary loan for this customer
+            loan = customer.loans[0] if customer.loans else None
+            
             # Create Redis session with temp_call_id
             customer_data = {
                 'id': str(customer.id),
-                'name': customer.name,
-                'phone_number': customer.phone_number,
+                'name': customer.full_name,  # Changed from customer.name to customer.full_name
+                'phone_number': customer.primary_phone,  # Changed from customer.phone_number
                 'state': customer.state,
-                'loan_id': customer.loan_id,
-                'amount': customer.amount,
-                'due_date': customer.due_date,
-                'language_code': customer.language_code,
+                'loan_id': loan.loan_id if loan else 'N/A',
+                'amount': float(loan.outstanding_amount) if loan and loan.outstanding_amount else 0,
+                'due_date': loan.next_due_date.isoformat() if loan and loan.next_due_date else None,
+                'language_code': 'en-IN',  # Default language
                 'temp_call_id': temp_call_id
             }
             
@@ -273,53 +284,82 @@ class CallManagementService:
             self.redis_manager.create_call_session(temp_call_id, customer_data, websocket_id)
             
             # Also store by phone number for easy lookup by WebSocket
-            phone_key = f"customer_phone_{customer.phone_number.replace('+', '').replace('-', '').replace(' ', '')}"
+            phone_key = f"customer_phone_{customer.primary_phone.replace('+', '').replace('-', '').replace(' ', '')}"
             self.redis_manager.store_temp_data(phone_key, customer_data, ttl=3600)
-            logger.info(f"Stored customer data in Redis: temp_call_id={temp_call_id}, phone_key={phone_key}")
+            logger.info(f"[CallService] Stored customer data in Redis: temp_call_id={temp_call_id}, phone_key={phone_key}")
             
             # Store temp_call_id mapping by phone for reverse lookup
-            temp_call_key = f"temp_call_phone_{customer.phone_number.replace('+', '').replace('-', '').replace(' ', '')}"
+            temp_call_key = f"temp_call_phone_{customer.primary_phone.replace('+', '').replace('-', '').replace(' ', '')}"
             self.redis_manager.store_temp_data(temp_call_key, temp_call_id, ttl=3600)
             
-            logger.info(f"About to trigger Exotel call for temp_call_id: {temp_call_id}")
+            logger.info(f"📞 [CHECKPOINT] About to trigger Exotel call for temp_call_id: {temp_call_id}")
             # Trigger Exotel call with customer data
-            exotel_response = await self._trigger_exotel_call(customer.phone_number, temp_call_id, customer_data)
+            exotel_response = await self._trigger_exotel_call(customer.primary_phone, temp_call_id, customer_data)
             
             if exotel_response['success']:
-                logger.info(f"Exotel call triggered successfully for temp_call_id: {temp_call_id}")
-                call_sid = exotel_response['call_sid']
+                logger.info(f"✅ [CHECKPOINT] Exotel call triggered successfully for temp_call_id: {temp_call_id}")
+                call_sid = exotel_response.get('call_sid')
                 
-                # Create database call session with actual Exotel SID
-                db_call_session = create_call_session(session, call_sid, customer.id, websocket_id)
+                # Handle case where call is successful but no call_sid is returned
+                if call_sid:
+                    logger.info(f"✅ [CHECKPOINT] CallSid received: {call_sid}")
+                else:
+                    logger.warning("⚠️ [WARNING] Call triggered successfully but no CallSid returned")
+                    call_sid = f"temp_{temp_call_id}"  # Use temp ID as fallback
                 
-                # Update Redis session with actual call SID
-                self.redis_manager.update_call_session(temp_call_id, {'call_sid': call_sid})
+                # Create call session in database
+                try:
+                    call_data = {
+                        'call_sid': call_sid,
+                        'customer_id': customer.id,
+                        'to_number': customer.primary_phone,
+                        'status': CallStatus.CALLING,
+                        'metadata': {'temp_call_id': temp_call_id}
+                    }
+                    call_session = create_call_session(session, call_data)
+                    session.commit()
+                    logger.info(f"✅ [CHECKPOINT] Call session created in database")
+                except Exception as db_error:
+                    logger.warning(f"⚠️ [WARNING] Failed to create call session in DB: {db_error}")
+                    # Continue anyway, don't fail the entire call
                 
-                # Update status
-                self.redis_manager.update_call_status(call_sid, CallStatus.RINGING, "Call initiated successfully")
-                update_call_status(session, call_sid, CallStatus.RINGING, "Call initiated successfully", 
-                                 {'exotel_response': exotel_response['response']})
-                
-                return {
+                result = {
                     'success': True,
+                    'message': f'Call triggered successfully for {customer.full_name}',
                     'call_sid': call_sid,
-                    'customer': customer_data,
-                    'status': CallStatus.RINGING
+                    'temp_call_id': temp_call_id,
+                    'customer_name': customer.full_name,
+                    'phone_number': customer.primary_phone,
+                    'warning': exotel_response.get('warning')  # Include any warnings
                 }
+
+                self.redis_manager.update_call_status(
+                    call_sid,
+                    CallStatus.INITIATED,
+                    "Call ringing customer"
+                )
+                
+                return result
             else:
-                logger.error(f"Exotel call failed for temp_call_id: {temp_call_id}. Error: {exotel_response.get('error')}")
-                # Update Redis session with failure
-                self.redis_manager.update_call_status(temp_call_id, CallStatus.FAILED, f"Failed to initiate call: {exotel_response['error']}")
+                error_msg = f"❌ [CHECKPOINT] Failed to trigger Exotel call for temp_call_id: {temp_call_id}. Error: {exotel_response.get('error')}"
+                logger.error(error_msg)
+                update_customer_call_status(session, customer_id, CallStatus.FAILED, call_attempt=True)
+                self.redis_manager.update_call_status(temp_call_id, CallStatus.FAILED, "Call failed to start")
                 
                 return {
                     'success': False,
-                    'error': exotel_response['error'],
+                    'error': f"Failed to trigger call: {exotel_response.get('error')}",
                     'temp_call_id': temp_call_id
                 }
                 
         except Exception as e:
-            logger.error(f"Exception in trigger_single_call: {e}", exc_info=True)
-            return {'success': False, 'error': str(e)}
+            error_msg = f"❌ [CHECKPOINT] Exception in trigger_single_call: {e}"
+            logger.error(error_msg, exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'traceback': traceback.format_exc()
+            }
         finally:
             self.db_manager.close_session(session)
     

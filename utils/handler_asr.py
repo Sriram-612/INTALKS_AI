@@ -1,5 +1,5 @@
 import base64
-import tempfile
+ 
 import io
 from pydub import AudioSegment
 from sarvamai import SarvamAI
@@ -96,33 +96,108 @@ class SarvamHandler:
                 return None
             
             audio_bytes = base64.b64decode(audio_base64)
+            logger.audio.info(f"🎵 Received audio data: {len(audio_bytes)} bytes")
             
-            # The audio is likely mp3, convert it to 8kHz mono 16-bit PCM (slin)
+            # Try in-memory processing first
             try:
-                audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
-            except Exception as dec_err:
-                logger.tts.error(f"❌ Decode mp3 failed: {dec_err}")
-                return None
-
-            slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
-            raw_pcm = slin_audio.raw_data
-            size = len(raw_pcm)
-            if raw_pcm[:4] == b'RIFF' and size > 44:
-                # Safety: if pydub ever returned WAV with header (shouldn't for raw_data) remove it
-                logger.tts.warning("⚠️ Unexpected RIFF header in raw_data – stripping")
-                raw_pcm = raw_pcm[44:]
-                size = len(raw_pcm)
-            logger.tts.info(f"✅ Audio ready PCM size={size} bytes, first10={raw_pcm[:10].hex()}")
-            if size < 200:
-                logger.tts.warning("⚠️ Very small audio payload – may be silence")
-            return raw_pcm
-
+                from io import BytesIO
+                
+                # Try different audio formats
+                audio_formats = [
+                    (None, "autodetect"),  # Try auto-detect first
+                    ('wav', "WAV"),
+                    ('mp3', "MP3"),
+                    ('ogg', "OGG")
+                ]
+                
+                audio_segment = None
+                
+                for fmt, fmt_name in audio_formats:
+                    try:
+                        audio_io = BytesIO(audio_bytes)
+                        if fmt:
+                            audio_segment = AudioSegment.from_file(audio_io, format=fmt)
+                        else:
+                            audio_segment = AudioSegment.from_file(audio_io)
+                        
+                        logger.audio.info(f"✅ Successfully loaded {fmt_name} audio: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
+                        break
+                    except Exception as e:
+                        logger.audio.debug(f"❌ Failed to load as {fmt_name}: {e}")
+                        continue
+                
+                if audio_segment is None:
+                    logger.audio.error("❌ Failed to load audio with any format, trying fallback")
+                    return await self._convert_with_temp_file(audio_bytes)
+                
+                # Convert to SLIN format (8kHz, mono, 16-bit)
+                slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+                final_bytes = slin_audio.raw_data
+                
+                if not final_bytes or len(final_bytes) == 0:
+                    logger.audio.error("❌ Empty audio data after conversion")
+                    return None
+                    
+                logger.audio.info(f"✅ SLIN audio ready: {len(final_bytes)} bytes, 8kHz mono")
+                return final_bytes
+                
+            except Exception as e:
+                logger.audio.error(f"❌ In-memory audio processing failed: {e}")
+                return await self._convert_with_temp_file(audio_bytes)
         except Exception as e:
-            logger.tts.error(f"❌ An error occurred: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.audio.error(f"❌ TTS synthesis failed: {e}")
             return None
-   
+            
+    async def _convert_with_temp_file(self, audio_bytes: bytes) -> bytes:
+        """Fallback method to convert audio using a temporary file"""
+        import tempfile
+        import os
+        
+        temp_file_path = None
+        try:
+            # Create a temporary file with a unique name
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                temp_file_path = temp_file.name
+                temp_file.write(audio_bytes)
+                temp_file.flush()
+            
+            # Process the file after it's closed
+            try:
+                # Try loading with auto-detect first
+                try:
+                    audio_segment = AudioSegment.from_file(temp_file_path)
+                    logger.audio.info(f"📊 Loaded temp file audio: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
+                except Exception as e:
+                    # Try with explicit WAV format
+                    audio_segment = AudioSegment.from_wav(temp_file_path)
+                    logger.audio.info(f"📊 Loaded temp WAV audio: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
+                
+                # Convert to SLIN format (8kHz, mono, 16-bit)
+                slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+                result = slin_audio.raw_data
+                
+                if not result or len(result) == 0:
+                    raise ValueError("Empty audio data after conversion")
+                    
+                return result
+                
+            finally:
+                # Ensure the temporary file is always deleted, even if an error occurs
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.unlink(temp_file_path)
+                    except Exception as e:
+                        logger.audio.error(f"❌ Error deleting temp file {temp_file_path}: {e}")
+                        
+        except Exception as e:
+            logger.audio.error(f"❌ Error during temp file audio processing: {e}")
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.unlink(temp_file_path)
+                except Exception as del_error:
+                    logger.audio.error(f"❌ Error cleaning up temp file {temp_file_path}: {del_error}")
+            return None
+
     async def synthesize_tts(self, text: str, lang: str) -> bytes:
         """Smart TTS synthesis with translation support"""
         logger.tts.info("🔁 Starting text-to-speech synthesis (with translation)")
@@ -133,7 +208,7 @@ class SarvamHandler:
             
             # Check if translation is needed
             if not self._is_text_in_target_language(text, lang_code):
-                logger.tts.info(f"� Text needs translation to {lang_code}")
+                logger.tts.info(f"🌐 Text needs translation to {lang_code}")
                 try:
                     response = self.client.translate.translate(
                         input=text,
@@ -195,45 +270,113 @@ class SarvamHandler:
             logger.tts.error(f"❌ TTS generation failed: {e}")
             return None
 
-        # Step 3: Convert to SLIN format with better error handling
+        # Convert to SLIN format (8kHz, mono, 16-bit)
         try:
             logger.tts.info("🎧 Converting audio to SLIN format...")
             
-            # Create temporary file to handle audio conversion
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_file.write(audio_bytes)
-                temp_file.flush()
-                
-                # Load audio using pydub with explicit format
+            # Use BytesIO for in-memory processing
+            from io import BytesIO
+            
+            # Try different audio formats
+            audio_formats = [
+                (None, "autodetect"),  # Try auto-detect first
+                ('wav', "WAV"),
+                ('mp3', "MP3"),
+                ('ogg', "OGG")
+            ]
+            
+            audio_segment = None
+            last_error = None
+            
+            for fmt, fmt_name in audio_formats:
                 try:
-                    audio_segment = AudioSegment.from_file(temp_file.name)
-                    logger.tts.info(f"📊 Original audio: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
-                except:
-                    # Try as WAV if MP3 fails
-                    audio_segment = AudioSegment.from_wav(temp_file.name)
-                    logger.tts.info(f"📊 WAV audio loaded: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
-                
-                # Convert to SLIN format (8kHz, mono, 16-bit)
-                slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
-                final_bytes = slin_audio.raw_data
-                
-                # Clean up temp file
-                import os
-                os.unlink(temp_file.name)
+                    audio_io = BytesIO(audio_bytes)
+                    if fmt:
+                        audio_segment = AudioSegment.from_file(audio_io, format=fmt)
+                    else:
+                        audio_segment = AudioSegment.from_file(audio_io)
+                    
+                    logger.tts.info(f"✅ Successfully loaded {fmt_name} audio: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
+                    break
+                except Exception as e:
+                    last_error = e
+                    logger.tts.debug(f"❌ Failed to load as {fmt_name}: {e}")
+                    continue
+            
+            if audio_segment is None:
+                logger.tts.error(f"❌ Failed to load audio with any format: {last_error}")
+                return None
+            
+            # Convert to SLIN format (8kHz, mono, 16-bit)
+            slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+            final_bytes = slin_audio.raw_data
+            
+            if not final_bytes or len(final_bytes) == 0:
+                logger.tts.error("❌ Empty audio data after conversion")
+                return None
                 
             logger.tts.info(f"✅ SLIN audio ready: {len(final_bytes)} bytes, 8kHz mono")
             
             # Validate audio data
             if len(final_bytes) < 1000:  # Less than ~62ms of audio
                 logger.tts.warning("⚠️ Very short audio generated, may be silence")
-                
+            
             return final_bytes
             
         except Exception as e:
             logger.tts.error(f"❌ Audio conversion failed: {e}")
             import traceback
             logger.tts.error(f"❌ Conversion traceback: {traceback.format_exc()}")
+            return None
+
+    async def _convert_with_temp_file(self, audio_bytes: bytes) -> bytes:
+        """Fallback method to convert audio using a temporary file"""
+        import tempfile
+        import os
+        
+        temp_file_path = None
+        try:
+            # Create a temporary file with a unique name
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                temp_file_path = temp_file.name
+                temp_file.write(audio_bytes)
+                temp_file.flush()
+            
+            # Process the file after it's closed
+            try:
+                # Try loading with auto-detect first
+                try:
+                    audio_segment = AudioSegment.from_file(temp_file_path)
+                    logger.tts.info(f"📊 Loaded temp file audio: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
+                except Exception as e:
+                    # Try with explicit WAV format
+                    audio_segment = AudioSegment.from_wav(temp_file_path)
+                    logger.tts.info(f"📊 Loaded temp WAV audio: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
+                
+                # Convert to SLIN format (8kHz, mono, 16-bit)
+                slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+                result = slin_audio.raw_data
+                
+                if not result or len(result) == 0:
+                    raise ValueError("Empty audio data after conversion")
+                    
+                return result
+                
+            finally:
+                # Ensure the temporary file is always deleted, even if an error occurs
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.unlink(temp_file_path)
+                    except Exception as e:
+                        logger.tts.error(f"❌ Error deleting temp file {temp_file_path}: {e}")
+                        
+        except Exception as e:
+            logger.tts.error(f"❌ Error during temp file audio processing: {e}")
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.unlink(temp_file_path)
+                except Exception as del_error:
+                    logger.tts.error(f"❌ Error cleaning up temp file {temp_file_path}: {del_error}")
             return None
 
     async def synthesize_tts_direct(self, text: str, lang: str) -> bytes:
