@@ -7,11 +7,13 @@ import redis
 import json
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union
 import os
+import logging
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 class RedisSessionManager:
     def __init__(self):
@@ -20,30 +22,41 @@ class RedisSessionManager:
         self.redis_password = os.getenv('REDIS_PASSWORD', None)
         self.redis_db = int(os.getenv('REDIS_DB', 0))
         
-        # Connection pool for better performance
+        # Connection pool for better performance (without SSL for compatibility)
         self.pool = redis.ConnectionPool(
             host=self.redis_host,
             port=self.redis_port,
             password=self.redis_password,
             db=self.redis_db,
             decode_responses=True,
-            max_connections=20
+            max_connections=50,
+            retry_on_timeout=True,
+            socket_connect_timeout=5,
+            socket_timeout=5
         )
+        
         self.redis_client = redis.Redis(connection_pool=self.pool)
         
-        # Session expiration times
+        # Session expiration times (in seconds)
         self.websocket_session_ttl = 3600  # 1 hour
         self.call_session_ttl = 7200  # 2 hours
         self.temp_data_ttl = 1800  # 30 minutes
+        self.call_status_ttl = 86400  # 24 hours for call status
         
-    def test_connection(self):
-        """Test Redis connection"""
+        # Test connection on init
+        self.test_connection()
+    
+    def test_connection(self) -> bool:
+        """Test Redis connection and log the result"""
         try:
-            self.redis_client.ping()
-            print("✅ Redis connection successful")
-            return True
+            if self.redis_client.ping():
+                logger.info("✅ Redis connection successful")
+                return True
+            else:
+                logger.error("❌ Redis ping failed")
+                return False
         except Exception as e:
-            print(f"❌ Redis connection failed: {e}")
+            logger.error(f"❌ Redis connection failed: {e}")
             return False
     
     # WebSocket Session Management
@@ -224,6 +237,34 @@ class RedisSessionManager:
         else:
             print(f"⚠️ [Redis] No temp session found for {temp_call_id}")
             return False
+     # ------------------------------------------------------------------
+    # Event broadcasting helpers
+    # ------------------------------------------------------------------
+
+    def publish_event(self, call_sid: Optional[str], event: Dict[str, Any], channel: Optional[str] = None) -> bool:
+        """Publish a realtime event over Redis pub/sub.
+
+        Args:
+            call_sid: Identifier for the call; used to namespace the channel when
+                a custom channel is not provided.
+            event: Serializable payload describing the event.
+            channel: Optional explicit channel name. Defaults to an event stream
+                derived from the call SID or a global broadcast channel.
+
+        Returns:
+            True if the publish succeeds, False otherwise.
+        """
+
+        target_channel = channel or (f"call_events:{call_sid}" if call_sid else "call_events:global")
+        try:
+            payload = json.dumps(event, default=str)
+            self.redis_client.publish(target_channel, payload)
+            return True
+        except Exception as exc:
+            # Fallback logging via print keeps the dependency surface small for utils.
+            print(f"❌ Redis publish_event failed on channel {target_channel}: {exc}")
+            return False
+    
     
     # Notification System
     def notify_websocket(self, websocket_id: str, message: Dict[str, Any]):

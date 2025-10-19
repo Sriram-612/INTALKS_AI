@@ -1,14 +1,24 @@
 import os
 import asyncio
 import base64
+import csv
 import json
+import logging
+from utils.logger import logger  # Add this import
+import os
+import re
+import tempfile
 import time
 import traceback
 import uuid
 import xml.etree.ElementTree as ET
-from contextlib import asynccontextmanager
-from datetime import datetime
-from typing import Optional
+import pytz
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, date, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union, Tuple
 from urllib.parse import quote
 
 import httpx
@@ -19,20 +29,55 @@ from dotenv import load_dotenv
 from fastapi import (Body, FastAPI, File, HTTPException, Request, UploadFile,
                      WebSocket, Depends, Query)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse)
+from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse, 
+                              RedirectResponse, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from requests.auth import HTTPBasicAuth
+from sqlalchemy.orm import joinedload
 from starlette.websockets import WebSocketDisconnect
 from starlette.middleware.sessions import SessionMiddleware
 
 # Load environment variables at the very beginning
 load_dotenv()
 
+IST = pytz.timezone("Asia/Kolkata")
+
+
+def get_ist_timestamp() -> datetime:
+    """Return current timestamp in IST."""
+    return datetime.now(IST)
+
+
+def format_ist_datetime(value: Optional[Union[datetime, date]]) -> Optional[str]:
+    """Format datetime/date to ISO string in IST timezone."""
+    if value is None:
+        return None
+
+    if isinstance(value, date) and not isinstance(value, datetime):
+        value = datetime.combine(value, datetime.min.time())
+
+    if value.tzinfo is None:
+        value = pytz.utc.localize(value)
+
+    return value.astimezone(IST).isoformat()
+
 # Import project-specific modules
-from database.schemas import (CallStatus, Customer,
-                              db_manager, init_database, update_call_status, get_call_session_by_sid)
+from database.schemas import (
+    CallSession,
+    CallStatus,
+    CallStatusUpdate,
+    Customer,
+    FileUpload,
+    UploadRow,
+    db_manager,
+    init_database,
+    update_call_status,
+    get_call_session_by_sid,
+    update_customer_call_status_by_phone,
+    update_customer_call_status,
+)
 from services.call_management import call_service
 from utils import bedrock_client
 from utils.agent_transfer import trigger_exotel_agent_transfer
@@ -44,35 +89,123 @@ from utils.redis_session import (init_redis, redis_manager,
 from utils.cognito_hosted_auth import cognito_auth, get_current_user, get_current_user_optional
 from utils.session_middleware import RedisSessionMiddleware, get_session
 
+# Set up transcript directory
+base_transcript_dir = Path(os.getenv("VOICEBOT_RUNTIME_DIR") or Path(__file__).resolve().parent)
+base_transcript_dir = base_transcript_dir.expanduser()
+try:
+    base_transcript_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Using transcript directory: {base_transcript_dir}")
+except Exception as e:
+    logger.error(f"Failed to create transcript directory: {e}")
+    raise
 
+
+# --- Dashboard WebSocket Management ---
+dashboard_clients: Dict[str, Dict[str, Any]] = {}
+dashboard_clients_lock = asyncio.Lock()
+
+
+async def register_dashboard_client(session_id: str, websocket: WebSocket) -> asyncio.Queue:
+    """Store dashboard websocket reference and return a queue for outbound events."""
+    event_queue: asyncio.Queue = asyncio.Queue()
+    async with dashboard_clients_lock:
+        dashboard_clients[session_id] = {"websocket": websocket, "queue": event_queue}
+    return event_queue
+
+
+async def unregister_dashboard_client(session_id: str) -> None:
+    """Remove dashboard websocket reference when disconnected."""
+    async with dashboard_clients_lock:
+        dashboard_clients.pop(session_id, None)
+
+
+async def broadcast_dashboard_update(event: Dict[str, Any]) -> None:
+    """Queue an event for every connected dashboard client."""
+    stale_sessions = []
+    async with dashboard_clients_lock:
+        clients_snapshot = list(dashboard_clients.items())
+
+    for session_id, client in clients_snapshot:
+        queue: asyncio.Queue = client["queue"]
+        try:
+            queue.put_nowait(event)
+        except Exception:
+            stale_sessions.append(session_id)
+
+    if stale_sessions:
+        async with dashboard_clients_lock:
+            for session_id in stale_sessions:
+                dashboard_clients.pop(session_id, None)
+
+
+async def push_status_update(
+    call_sid: str,
+    status: str,
+    message: str = "",
+    customer_id: Optional[str] = None,
+) -> None:
+    """Publish a status update to Redis and live dashboard clients."""
+    normalized_status = (status or "ready").lower()
+
+    resolved_customer_id = customer_id
+    lookup_session = None
+
+    if call_sid and not resolved_customer_id:
+        try:
+            lookup_session = db_manager.get_session()
+            call_session = get_call_session_by_sid(lookup_session, call_sid)
+            if call_session and call_session.customer_id:
+                resolved_customer_id = str(call_session.customer_id)
+        except Exception as lookup_error:
+            logger.websocket.error(
+                f"❌ Failed to resolve customer for CallSid={call_sid}: {lookup_error}"
+            )
+        finally:
+            if lookup_session:
+                lookup_session.close()
+
+    event: Dict[str, Any] = {
+        "type": "status_update",
+        "event": "call_status_update",
+        "call_sid": call_sid,
+        "status": normalized_status,
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    if resolved_customer_id:
+        event["customer_id"] = resolved_customer_id
+
+    redis_manager.publish_event(call_sid, event)
+    await broadcast_dashboard_update(event)
+    
 # --- Lifespan Management ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     # Initialize logging system first
     setup_application_logging()
-    logger.info("🚀 Starting Voice Assistant Application...")
+    logger.app.info("🚀 Starting Voice Assistant Application...")
     
     # Initialize database
     if init_database():
-        logger.info("✅ Database initialized successfully")
+        logger.app.info("✅ Database initialized successfully")
         logger.database.info("Database connection established")
     else:
-        logger.error("❌ Database initialization failed")
+        logger.error.error("❌ Database initialization failed")
         logger.database.error("Failed to establish database connection")
     
     # Initialize Redis
     if init_redis():
-        logger.info("✅ Redis initialized successfully")
+        logger.app.info("✅ Redis initialized successfully")
     else:
-        logger.warning("❌ Redis initialization failed - running without session management")
+        logger.app.warning("❌ Redis initialization failed - running without session management")
     
-    logger.info("🎉 Application startup complete!")
+    logger.app.info("🎉 Application startup complete!")
     
     yield
     
     # Shutdown
-    logger.info("🛑 Shutting down Voice Assistant Application...")
+    logger.app.info("🛑 Shutting down Voice Assistant Application...")
 
 app = FastAPI(
     title="Voice Assistant Call Management System",
@@ -104,181 +237,1072 @@ app.add_middleware(
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 sarvam_handler = ProductionSarvamHandler(SARVAM_API_KEY)
 
+AWS_REGION = os.getenv("AWS_REGION") or "eu-north-1"
+
+# Claude configuration
+CLAUDE_MAX_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", 1000))
+CLAUDE_TEMPERATURE = float(os.getenv("CLAUDE_TEMPERATURE", 0.7))
+CLAUDE_MODEL_ID = os.getenv("CLAUDE_MODEL_ID") or os.getenv("CLAUDE_INTENT_MODEL_ID")
+CLAUDE_SYSTEM_PROMPT = (
+    os.getenv("CLAUDE_SYSTEM_PROMPT")
+    or (
+        "You are Priya, a collections specialist calling from Intalks NGN Bank. "
+        "Obtain a concrete repayment commitment for the overdue EMI. "
+        "Respond in 1-2 short sentences and always append a tag in brackets at the end. "
+        "Do not output JSON or code blocks; speak naturally as a human agent. "
+        "Match the caller's language at all times. If the caller switches languages, instantly switch with them. "
+        "Use a casual, modern tone—sound like a friendly contemporary caller, not a formal script. "
+        "Avoid archaic or literary vocabulary in any language. "
+        "For Tamil, lean on everyday spoken Tamil (உங்களுக்கு → உங்களுக்கு, நான் → நா, etc.) rather than நூல் தமிழ். "
+        "For Hindi, use simple spoken Hindi and avoid heavy Sanskrit. "
+        "For Telugu, Malayalam, Kannada, Bengali, Marathi, Gujarati, Punjabi, and Odia, prefer the kind of words people use in daily conversations at home or with friends. "
+        "Only append [promise] after the customer clearly confirms repayment in a declarative sentence—never add it to your own questions. "
+        "Reserve [escalate] for situations where the customer has refused repayment five or more times or explicitly asks for escalation; otherwise continue the conversation with [continue]."
+    )
+)
+
+claude_runtime_client = None
+if CLAUDE_MODEL_ID:
+    try:
+        claude_runtime_client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+        logger.app.info("🤖 Claude client configured")
+    except Exception as claude_err:
+        logger.error.error(f"❌ Failed to configure Claude client: {claude_err}")
+        claude_runtime_client = None
+else:
+    logger.app.warning("⚠️ CLAUDE_MODEL_ID not set; Claude voice handoff disabled")
+
+
+
+class ClaudeChatSession:
+    """Manages a conversation session with Claude."""
+    
+    def __init__(self, call_sid: str, context: Dict[str, Any]) -> None:
+        self.call_sid = call_sid
+        self.context = context
+        self.messages: List[Dict[str, Any]] = []
+        base_prompt = CLAUDE_SYSTEM_PROMPT or ""
+        context_prompt = (
+            "Caller details: name={name}, loan_id={loan_id}, phone={phone}. "
+            "The EMI is overdue; ask about repayment timing."
+        ).format(
+            name=context.get("name") or "customer",
+            loan_id=context.get("loan_id") or "unknown",
+            phone=context.get("phone") or "unknown",
+        )
+        self.system_messages: List[Dict[str, str]] = []
+        if base_prompt:
+            self.system_messages.append({"text": base_prompt})
+        self.system_messages.append({"text": context_prompt})
+    
+    def send(self, user_text: str) -> str:
+        if not claude_runtime_client or not CLAUDE_MODEL_ID:
+            raise RuntimeError("Claude runtime client not configured")
+
+        self.messages.append({
+            "role": "user",
+            "content": [{"text": user_text}]
+        })
+
+        try:
+            response = claude_runtime_client.converse(
+                modelId=CLAUDE_MODEL_ID,
+                messages=self.messages,
+                system=self.system_messages,
+                inferenceConfig={"temperature": 0.3, "maxTokens": 512, "topP": 0.9},
+            )
+        except (BotoCoreError, ClientError) as err:
+            raise RuntimeError(f"Claude converse error: {err}") from err
+        except Exception as err:
+            raise RuntimeError(f"Unexpected Claude error: {err}") from err
+
+        try:
+            output_message = response["output"]["message"]
+            parts = output_message.get("content", [])
+            assistant_text = "".join(
+                part.get("text", "") for part in parts if isinstance(part, dict)
+            )
+        except Exception as parse_err:
+            raise RuntimeError(
+                f"Unexpected Claude response format: {parse_err}; raw={response!r}"
+            ) from parse_err
+
+        cleaned = assistant_text.strip()
+        self.messages.append({
+            "role": "assistant",
+            "content": [{"text": cleaned}]
+        })
+        return cleaned
+
+
+class ClaudeChatManager:
+    """Manages multiple Claude chat sessions."""
+    
+    def __init__(self) -> None:
+        self.sessions: Dict[str, ClaudeChatSession] = {}
+    
+    def start_session(self, call_sid: str, context: Dict[str, Any]) -> Optional[ClaudeChatSession]:
+        if not claude_runtime_client or not CLAUDE_MODEL_ID:
+            return None
+        try:
+            session = ClaudeChatSession(call_sid, context)
+            self.sessions[call_sid] = session
+            return session
+        except Exception as err:
+            logger.error.error(f"❌ Unable to start Claude chat for {call_sid}: {err}")
+            return None
+    
+    def get_session(self, call_sid: str) -> Optional[ClaudeChatSession]:
+        """Get an existing chat session."""
+        return self.sessions.get(call_sid)
+    
+    def end_session(self, call_sid: str) -> None:
+        """End a chat session."""
+        self.sessions.pop(call_sid, None)
+
+
+# Global chat manager instance
+claude_chat_manager = ClaudeChatManager()
+
+
+async def claude_reply(chat: ClaudeChatSession, message: str) -> str:
+    """Get a response from Claude for the given message."""
+    try:
+        # Run the synchronous send method in a thread
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, chat.send, message)
+        return response
+    except Exception as e:
+        logger.error(f"Error getting Claude reply: {e}")
+        return "I'm sorry, I'm having trouble understanding. Could you please rephrase that?"
+
+
+def parse_claude_response(raw: str) -> tuple[str, str]:
+    if not raw:
+        return "", "continue"
+    text = raw.strip()
+    bracket_pattern = r"\[(continue|promise|escalate)\]\s*$"
+    match = re.search(bracket_pattern, text, re.IGNORECASE)
+    if match:
+        status = match.group(1).lower()
+        response = text[:match.start()].strip()
+        return response, status
+    try:
+        data = json.loads(text)
+        resp = data.get("response")
+        status = data.get("status", "continue")
+        if not isinstance(resp, str):
+            resp = text
+        if not isinstance(status, str):
+            status = "continue"
+        status = status.lower()
+        if status not in {"continue", "promise", "escalate"}:
+            status = "continue"
+        return resp.strip(), status
+    except json.JSONDecodeError:
+        logger.websocket.warning("⚠️ Claude returned text without status tag; defaulting to continue")
+        return text, "continue"
+
+base_transcript_dir = Path(os.getenv("VOICEBOT_RUNTIME_DIR") or Path(__file__).resolve().parent)
+base_transcript_dir = base_transcript_dir.expanduser()
+try:
+    base_transcript_dir.mkdir(parents=True, exist_ok=True)
+except Exception as transcript_dir_err:
+    fallback_dir = Path(tempfile.gettempdir()) / "voicebot_transcripts"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    logger.app.warning(
+        f"⚠️ Could not create transcript directory at {base_transcript_dir}: {transcript_dir_err}."
+        f" Falling back to {fallback_dir}"
+    )
+    base_transcript_dir = fallback_dir
+
+transcripts_file_env = os.getenv("TRANSCRIPTS_FILE")
+if transcripts_file_env:
+    TRANSCRIPTS_FILE_PATH = Path(transcripts_file_env).expanduser()
+else:
+    TRANSCRIPTS_FILE_PATH = base_transcript_dir / "transcripts.txt"
+
+logger.app.info(f"🗒️ Transcript log file: {TRANSCRIPTS_FILE_PATH}")
+
+
+
+class TranscriptLogger:
+    """Accumulates customer speech and writes to disk after silence gaps."""
+    
+    def __init__(self, file_path: Path, call_sid: str, silence_gap: float = 5.0) -> None:
+        self.file_path = file_path
+        self.call_sid = call_sid
+        self.silence_gap = silence_gap
+        self.pending_segments: List[str] = []
+        self.last_speech_time: Optional[float] = None
+        self.header_written = False
+        self.customer_name: Optional[str] = None
+        self.customer_phone: Optional[str] = None
+    
+    def update_customer(self, name: Optional[str] = None, phone: Optional[str] = None) -> None:
+        if name:
+            self.customer_name = name
+        if phone:
+            self.customer_phone = phone
+    
+    def add_transcript(self, text: str, timestamp: Optional[float] = None) -> None:
+        """Add a transcript segment and write to disk if enough silence has passed."""
+        if not text.strip():
+            return
+            
+        now = timestamp or time.time()
+        self.pending_segments.append(text)
+        self.last_speech_time = now
+        
+        # Check if we should flush based on silence gap
+        self.flush(force=True, current_time=self.last_speech_time)
+
+    
+    def maybe_flush(self, current_time: Optional[float] = None) -> None:
+        """Flush pending segments if silence gap has been exceeded."""
+        if not self.pending_segments:
+            return
+            
+        current_time = current_time or time.time()
+        if self.last_speech_time and (current_time - self.last_speech_time) >= self.silence_gap:
+            self.flush()
+    
+    def flush(self, force: bool = False, current_time: Optional[float] = None) -> None:
+        if not self.pending_segments:
+            return
+
+        current_time = current_time or time.time()
+        if not force and self.last_speech_time and (current_time - self.last_speech_time) < self.silence_gap:
+            return
+
+        entry_text = " ".join(self.pending_segments).strip()
+        if not entry_text:
+            self.pending_segments.clear()
+            return
+
+        self._ensure_header()
+        timestamp = datetime.utcnow().isoformat()
+        line = f"{timestamp} | {entry_text}\n"
+        self._write_line(line)
+        logger.websocket.info(f"📝 Transcript segment saved ({len(entry_text)} chars) for CallSid={self.call_sid}")
+        logger.call.info(
+            f"[TRANSCRIPT] CallSid={self.call_sid} | {entry_text}",
+            extra={"call_sid": self.call_sid}
+        )
+        self.pending_segments.clear()
+        self.last_speech_time = None
+
+    def _ensure_header(self) -> None:
+        if self.header_written:
+            return
+
+        timestamp = datetime.utcnow().isoformat()
+        details = []
+        if self.customer_name:
+            details.append(f"Customer: {self.customer_name}")
+        if self.customer_phone:
+            details.append(f"Phone: {self.customer_phone}")
+
+        header_main = f"\n=== Call {self.call_sid} | Started {timestamp}"
+        if details:
+            header_main += " | " + " | ".join(details)
+        header = header_main + " ===\n"
+        self._write_line(header)
+        self.header_written = True
+
+    def _write_line(self, text: str) -> None:
+        """Write a single line to the transcript file."""
+        try:
+            self._ensure_header()
+            with open(self.file_path, "a", encoding="utf-8") as f:
+                f.write(f"{text}\n")
+        except Exception as e:
+            logger.error(f"Error writing to transcript: {e}")
+
 # --- Constants ---
-BUFFER_DURATION_SECONDS = 7.0  # Wait 7 seconds for user response (CONVERSATION FLOW FIX: increased to allow more thinking time)
-AGENT_RESPONSE_BUFFER_DURATION = 7.0  # Wait even longer for user to answer agent connect question
+BUFFER_DURATION_SECONDS = 1.0
+AGENT_RESPONSE_BUFFER_DURATION = 5.0  # Wait longer for user to answer agent connect question
 MIN_AUDIO_BYTES = 3200  # ~0.2s at 8kHz 16-bit mono; ignore too-short buffers
+CONFIRMATION_SILENCE_SECONDS = 1.0
+CLAUDE_SILENCE_SECONDS = 3.0
+MAX_CLAUDE_TURNS = int(os.getenv("CLAUDE_MAX_TURNS", "6"))
+CLAUDE_REFUSAL_THRESHOLD = int(os.getenv("CLAUDE_REFUSAL_THRESHOLD", "3"))
 
 # --- Multilingual Prompt Templates with SSML and Pauses ---
 GREETING_TEMPLATE = {
-    "en-IN": "Hello, this is Priya from South India Finvest Bank. Am I speaking with Mr. {name}?",
-    "hi-IN": "नमस्ते, मैं प्रिया हूं, साउथ इंडिया फिनवेस्ट बैंक से। क्या मैं श्री {name} से बात कर रही हूं?",
-    "ta-IN": "வணக்கம், நான் பிரியா, சவுத் இந்தியா ஃபின்வெஸ்ட் வங்கியிலிருந்து பேசுகிறேன். நான் திரு {name} அவர்களுடன் பேசுகிறேனா?",
-    "te-IN": "నమస్కారం, నేను ప్రియ, సౌత్ ఇండియా ఫిన్‌వెస్ట్ బ్యాంక్ నుండి మాట్లాడుతున్నాను. నేను శ్రీ {name} గారితో మాట్లాడుతున్నానా?",
-    "ml-IN": "നമസ്കാരം, ഞാൻ പ്രിയ, സൗത്ത് ഇന്ത്യ ഫിൻവെസ്റ്റ് ബാങ്കിൽ നിന്ന് സംസാരിക്കുന്നു. ഞാൻ ശ്രീ {name}ുമായി സംസാരിക്കുകയാണോ?",
-    "gu-IN": "નમસ્તે, હું પ્રિયા, સાઉથ ઇન્ડિયા ફિનવેસ્ટ બેંકમાંથી બોલી રહી છું. શું હું શ્રી {name} સાથે વાત કરી રહી છું?",
-    "mr-IN": "नमस्कार, मी प्रिया, साउथ इंडिया फिनवेस्ट बँकेतून बोलत आहे. मी श्री {name} यांच्याशी बोलत आहे का?",
-    "bn-IN": "নমস্কার, আমি প্রিয়া, সাউথ ইন্ডিয়া ফিনভেস্ট ব্যাংক থেকে বলছি। আমি কি श्री {name}-এর সঙ্গে কথা বলছি?",
-    "kn-IN": "ನಮಸ್ಕಾರ, ನಾನು ಪ್ರಿಯಾ, ಸೌತ್ ಇಂಡಿಯಾ ಫಿನ್‌ವೆಸ್ಟ್ ಬ್ಯಾಂಕ್‌ನಿಂದ ಮಾತನಾಡುತ್ತಿದ್ದೇನೆ. ನಾನು ಶ್ರೀ {name} ಅವರೊಂದಿಗೆ ಮಾತನಾಡುತ್ತಿದ್ದೇನೇ?",
-    "pa-IN": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ਮੈਂ ਪ੍ਰਿਆ, ਸਾਊਥ ਇੰਡੀਆ ਫਿਨਵੈਸਟ ਬੈਂਕ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਮੈਂ ਸ੍ਰੀ {name} ਨਾਲ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ?",
-    "or-IN": "ନମସ୍କାର, ମୁଁ ପ୍ରିୟା, ସାଉଥ୍ ଇଣ୍ଡିଆ ଫିନଭେଷ୍ଟ ବ୍ୟାଙ୍କରୁ କହୁଛି। ମୁଁ କି ସ୍ରୀ {name} ସହ କଥା କହୁଛି?",
+    "en-IN": "Hi {name}, Priya here from South India Finvest Bank. Is this you on the line?",
+    "hi-IN": "नमस्ते {name} जी, मैं प्रिया बोल रही हूँ, साउथ इंडिया फिनवेस्ट बैंक से. क्या आप अभी बात कर सकते हैं?",
+    "ta-IN": "ஹாய் {name} அவர்களே, நான் பிரியா. சவுத் இந்தியா ஃபின்வெஸ்ட் வங்கியிலிருந்து பேசுகிறேன். நீங்கள்தானே பேசுறது?",
+    "te-IN": "హాయ్ {name} గారూ, నేను ప్రియా, సౌత్ ఇండియా ఫిన్వెస్ట్ బ్యాంక్ నుంచి మాట్లాడుతున్నాను. మీరు నేనే మాట్లాడ్తున్నారా?",
+    "ml-IN": "ഹായ് {name} സാർ, ഞാൻ പ്രിയ, സൗത്ത് ഇന്ത്യ ഫിൻവെസ്റ്റ് ബാങ്കിൽ നിന്ന് സംസാരിക്കുകയാണ്. ഇത് നിങ്ങൾ തന്നെയാണോ?",
+    "gu-IN": "હાય {name}જી, હું પ્રિયા, સાઉથ ઇન્ડિયા ફિનવેસ્ટ બેંકમાંથી વાત કરું છું. તમે જ બોલી રહ્યા છો ને?",
+    "mr-IN": "हाय {name} जी, मी प्रिया, साउथ इंडिया फिनवेस्ट बँकेतून बोलते आहे. आपणच बोलत आहात ना?",
+    "bn-IN": "হাই {name}, আমি প্রিয়া, সাউথ ইন্ডিয়া ফিনভেস্ট ব্যাংক থেকে বলছি। আপনি কি এখন লাইনে আছেন?",
+    "kn-IN": "ಹಾಯ್ {name} ಅವ್ರೇ, ನಾನು ಪ್ರಿಯಾ, ಸೌತ್ ಇಂಡಿಯಾ ಫಿನ್‌ವೆಸ್ಟ್ ಬ್ಯಾಂಕ್‌ನಿಂದ ಮಾತಾಡ್ತಾ ಇದ್ದೀನಿ. ನೀವು ಮಾತಾಡ್ತಿದ್ದೀರಾ?",
+    "pa-IN": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ {name} ਜੀ, ਮੈਂ ਪ੍ਰਿਆ ਹਾਂ, ਸਾਊਥ ਇੰਡੀਆ ਫਿਨਵੈਸਟ ਬੈਂਕ ਤੋਂ. ਤੁਸੀਂ ਗੱਲ ਕਰ ਰਹੇ ਹੋ ਨਾ?",
+    "od-IN": "ହାଇ {name} ଜୀ, ମୁଁ ପ୍ରିୟା, ସାଉଥ ଇଣ୍ଡିଆ ଫିନଭେଷ୍ଟ ବ୍ୟାଙ୍କରୁ କଥାହୁଁଛି। ଆପଣେ କଥା କରୁଛନ୍ତି तो?",
 }
 
 
 EMI_DETAILS_PART1_TEMPLATE = {
-    "en-IN": "Your loan ending {loan_id} has an EMI of ₹{amount} due on {due_date}.",
-    "hi-IN": "आपके लोन {loan_id} की ईएमआई ₹{amount} {due_date} को देय है।",
-    "ta-IN": "உங்கள் கடன் {loan_id} க்கான EMI ₹{amount} {due_date} அன்று செலுத்த வேண்டியுள்ளது.",
-    "te-IN": "మీ రుణం {loan_id} కి సంబంధించిన ₹{amount} EMI {due_date} నాటికి చెల్లించవలసి ఉంటుంది.",
-    "ml-IN": "നിങ്ങളുടെ വായ്പ {loan_id} ന് ₹{amount} EMI {due_date} ന് അടയ്ക്കേണ്ടതാണ്.",
-    "gu-IN": "તમારા લોન {loan_id} ની ₹{amount} EMI {due_date} ના રોજ ચુકવવાની છે.",
-    "mr-IN": "तुमच्या कर्ज {loan_id} ची ₹{amount} EMI {due_date} रोजी देय आहे.",
-    "bn-IN": "আপনার ঋণ {loan_id} এর ₹{amount} EMI {due_date} তারিখে পরিশোধযোগ্য।",
-    "kn-IN": "ನಿಮ್ಮ ಸಾಲ {loan_id} ಗೆ ₹{amount} EMI {due_date} ರಂದು ಪಾವತಿಸಬೇಕಾಗಿದೆ.",
-    "pa-IN": "ਤੁਹਾਡੇ ਲੋਨ {loan_id} ਦੀ ₹{amount} EMI {due_date} ਨੂੰ ਅਦਾ ਕਰਨੀ ਹੈ।",
-    "or-IN": "ଆପଣଙ୍କର ଋଣ {loan_id} ର ₹{amount} EMI {due_date} ରେ ଦେୟ ଅଟେ।",
+    "en-IN": "Thanks {name}. I'm calling about your loan ending {loan_id}. The EMI of ₹{amount} was due on {due_date} and is still open. I get that delays happen, so I wanted to see how we can close it without stress.",
+    "hi-IN": "थैंक्यू {name} जी. आपका {loan_id} वाला लोन है, उसकी ₹{amount} की EMI {due_date} से पेंडिंग है. थोड़ा लेट होना समझ में आता है, बस बिना झंझट इसे कैसे निपटाएं यही देखना था.",
+    "ta-IN": "சரி {name}, {loan_id} ல் முடியும் உங்கள் கடனுக்கான ₹{amount} EMI {due_date}க்கு கட்ட வேண்டியது இன்னும் ஓப்பனாக இருக்கு. தாமதம் ஆகலாம் என்பதுனு புரியுது, tension இல்லாமல் எப்படி முடிக்கலாம் என்பதையே பேசுறேன்.",
+    "te-IN": "సరి {name} గారు, {loan_id} నంబర్‌‌ ఉన్న మీ లోన్‌కు ₹{amount} EMI {due_date}కి పెండింగ్‌గా ఉంది. ఆలస్యం అవడం సహజం, కాబట్టి ఇబ్బంది లేకుండా ఎలా క్లియర్ చేసేద్దాం అని మాట్లాడుతున్నాను.",
+    "ml-IN": "ശരി {name} സാർ, {loan_id} ലായുള്ള ലോണിന്റെ ₹{amount} EMI {due_date}-ന് അടയ്ക്കേണ്ടതായിരുന്നു, അത് ഇനിയും ബാക്കി. താമസമാവുന്നത് മനസ്സിലാകുന്നു, ചില്ലറ ക്ലേശമില്ലാതെ തീർപ്പാക്കാൻ സഹായിക്കാനാണ് വിളിച്ചത്.",
+    "gu-IN": "સારું {name}જી, {loan_id} પરના તમારા લોનની ₹{amount} EMI {due_date} થી બાકી છે. મોડું થવું બને છે, તો કોઈ ટેન્શન વગર કેવી રીતે સેટલ કરીએ એ માટે વાત કરવી હતી.",
+    "mr-IN": "बरं {name} जी, {loan_id} नंबरच्या लोनची ₹{amount} ची EMI {due_date} पासून बाकी आहे. उशीर होऊ शकतो हे समजतो, म्हणून तणावाशिवाय कसं क्लिअर करायचं ते पाहायला कॉल केला.",
+    "bn-IN": "ঠিক আছে {name}, {loan_id} নম্বরের লোনের ₹{amount} EMI {due_date} থেকে ঝুলে আছে. দেরি হওয়া স্বাভাবিক, তাই বিনা ঝামেলায় মিটিয়ে দিতে পারি কি না সেটাই দেখতে ফোন করেছি.",
+    "kn-IN": "ಸರಿ {name} ಅವ್ರೇ, {loan_id} ಸಾಲದ ₹{amount} EMI {due_date} ರಿಂದ ಉಳಿದಿದೆ. ಸ್ವಲ್ಪ ತಡವಾಗೋದು ಆಗುತ್ತೇ, ಚಿಂತೆ ಇಲ್ಲದೆ ಹೇಗೆ ಕ್ಲೋಸ್ ಮಾಡೋದು ಅಂತ ನೋಡ್ತಾ ಇದ್ದೀನಿ.",
+    "pa-IN": "ਚਲੋ {name} ਜੀ, {loan_id} ਵਾਲੇ ਤੁਹਾਡੇ ਲੋਨ ਦੀ ₹{amount} EMI {due_date} ਤੋਂ ਪੈਂਡਿੰਗ ਹੈ. ਥੋੜ੍ਹੀ ਦੇਰੀ ਹੋ ਜਾਂਦੀ ਹੈ, ਬਿਨਾ ਟੈਂਸ਼ਨ ਕਿਵੇਂ ਕਲੀਅਰ ਕਰੀਏ ਇਹੀ ਗੱਲ ਕਰਨੀ ਸੀ.",
+    "od-IN": "ଠିକ ଅଛି {name} ଜୀ, {loan_id} ଲୋନର ₹{amount} EMI {due_date} ଠାରୁ ଅପେଣ୍ଡିଂ ଅଛି। ଦେରି ହେବା ସାଧାରଣ, ଚିନ୍ତା ବିନା କେମିତି ସେଟଲ କରିବା ଭଲ ହେବ ସେଇଥି ପାଇଁ କହୁଛି."
 }
 
 
 EMI_DETAILS_PART2_TEMPLATE = {
-    "en-IN": "If unpaid, it may affect your credit score and add penalties.",
-    "hi-IN": "यदि बकाया रहे तो आपका क्रेडिट स्कोर प्रभावित हो सकता है और पेनल्टी लग सकती है।",
-    "ta-IN": "செலுத்தாவிட்டால், உங்கள் கிரெடிட் ஸ்கோர் பாதிக்கப்படலாம் மற்றும் அபராதம் வரலாம்.",
-    "te-IN": "చెల్లించకపోతే, మీ క్రెడిట్ స్కోర్ ప్రభావితం కావచ్చు మరియు జరిమానా విధించబడవచ్చు.",
-    "ml-IN": "അടയ്ക്കാതിരുന്നാൽ, നിങ്ങളുടെ ക്രെഡിറ്റ് സ്കോർ ബാധിക്കാം, പിഴയും ബാധകമാകും.",
-    "gu-IN": "ચુકવવામાં ન આવે તો, તમારો ક્રેડિટ સ્કોર પ્રભાવિત થઈ શકે છે અને દંડ લાગી શકે છે.",
-    "mr-IN": "न भरल्यास, तुमचा क्रेडिट स्कोर प्रभावित होऊ शकतो आणि दंड आकारला जाऊ शकतो.",
-    "bn-IN": "অপরিশোধিত থাকলে, আপনার ক্রেডিট স্কোর প্রভাবিত হতে পারে এবং জরিমানা আরোপ হতে পারে।",
-    "kn-IN": "ಪಾವತಿಯಾಗದಿದ್ದರೆ, ನಿಮ್ಮ ಕ್ರೆಡಿಟ್ ಸ್ಕೋರ್ ಪರಿಣಾಮವಾಗಬಹುದು ಮತ್ತು ದಂಡ ವಿಧಿಸಲಾಗಬಹುದು.",
-    "pa-IN": "ਜੇ ਨਹੀਂ ਭਰਿਆ ਤਾਂ, ਤੁਹਾਡਾ ਕਰੈਡਿਟ ਸਕੋਰ ਪ੍ਰਭਾਵਿਤ ਹੋ ਸਕਦਾ ਹੈ ਅਤੇ ਜੁਰਮਾਨਾ ਲੱਗ ਸਕਦਾ ਹੈ।",
-    "or-IN": "ଅପରିଶୋଧିତ ରହିଲେ, ଆପଣଙ୍କର କ୍ରେଡିଟ୍ ସ୍କୋର ପ୍ରଭାବିତ ହୋଇପାରେ ଏବଂ ଜରିମାନା ଲାଗିପାରେ।",
+    "en-IN": "If we let it hang longer, the bank has to alert the credit bureau and your score can dip. Penalties or collection follow-ups could also start, so better to sort it now.",
+    "hi-IN": "अगर ये और लटका तो बैंक को क्रेडिट ब्यूरो को बताना पड़ेगा और स्कोर गिर सकता है. पेनल्टी या कलेक्शन फॉलो-अप भी आ सकते हैं, इसलिए अभी निपटा लें.",
+    "ta-IN": "இன்னும் இழுத்தால் கிரெடிட் போர்டுக்கு தகவல் போகும், ஸ்கோர் குறைய வாய்ப்பு உண்டு. அபராதம் அல்லது follow-up calls வரலாம், அதுக்குள் முடிச்சிடலாம்.",
+    "te-IN": "ఇంకా దాపురిస్తే క్రెడిట్ బ్యూరోకి సమాచారం వెళ్లి స్కోర్ తగ్గొచ్చు. పెనాల్టీ లేదా కలెక్షన్ కాల్స్ రావచ్చు, కాబట్టి ఇప్పుడు క్లియర్ చేసేద్దాం.",
+    "ml-IN": "ഇത് കൂടുതല്‍ നീണ്ടാല്‍ ക്രെഡിറ്റ് ബ്യൂറോയിലേക്ക് റിപ്പോട്ട് പോകും, സ്കോര്‍ താഴാം. പിഴയോ കളക്ഷന്‍ കോള്‍സോ വരാം, അതിനാല്‍ ഉടന്‍ തീര്‍ക്കാം.",
+    "gu-IN": "વધારે લટકશે તો ક્રેડિટ બ્યુરો સુધી વાત જશે અને સ્કોર ઘટી શકે. દંડ અથવા કલેક્શન કોલ પણ આવી શકે, એટલે હમણાં જ સેટલ કરી દઈએ.",
+    "mr-IN": "अजून थांबवलं तर क्रेडिट ब्युरोला कळेल आणि स्कोर खाली येऊ शकतो. पेनल्टी किंवा कलेक्शन कॉल लागू शकतात, म्हणून आत्ताच मिटवू या.",
+    "bn-IN": "আর দেরি হলে ক্রেডিট ব্যুরোতে রিপোর্ট যাবে, স্কোর কমে যেতে পারে। পেনাল্টি বা কালেকশন কলও আসতে পারে, তাই এখনই মিটিয়ে ফেলি.",
+    "kn-IN": "ಇನ್ನೂ ವಿಳಂಬವಾಯ್ತು ಅಂದರೆ ಕ್ರೆಡಿಟ್ ಬ್ಯೂರೋಗೆ ವರದಿ ಹೋಗಿ ಸ್ಕೋರ್ ಕೆಳಗೆ ಬೀಳಬಹುದು. ಪೆನಾಲ್ಟಿ ಅಥವಾ ಕಲೆಕ್ಷನ್ ಫಾಲೋ-ಅಪ್ ಬರಬಹುದು, ಆದ್ದರಿಂದ ಈಗಲೇ ಮುಗಿಸೋಣ.",
+    "pa-IN": "ਜੇ ਹੋਰ ਲਟਕਿਆ ਰਿਹਾ ਤਾਂ ਗੱਲ ਕਰੈਡਿਟ ਬਿਊਰੋ ਤੱਕ ਜਾਵੇਗੀ ਤੇ ਸਕੋਰ ਡਿੱਗ ਸਕਦਾ ਹੈ. ਪੈਨਲਟੀ ਜਾਂ ਕਲੇਕਸ਼ਨ ਕਾਲ ਵੀ ਆ ਸਕਦੇ ਨੇ, ਸੋ ਚੰਗਾ ਹੈ ਹੁਣੇ ਫਾਇਨਲ ਕਰੀਏ.",
+    "od-IN": "ଆଉ ଦେରି କଲେ ବ୍ୟାଙ୍କୁ କ୍ରେଡିଟ ବ୍ୟୁରୋକୁ ଜଣାଇବାକୁ ପଡ଼ିବ ଏବଂ ସ୍କୋର କମିଯିବାର ସମ୍ଭାବନା ରହିବ. ପେନାଲ୍ଟି କିମ୍ବା କଲେକ୍ସନ କଲ୍‌ ମଧ୍ୟ ଆସିପାରେ, ତେଣୁ ଏବେ ସଟିକେ ସେଟଲ କରିଦେବା ଭଲ."
 }
 
-
 AGENT_CONNECT_TEMPLATE = {
-    "en-IN": "Would you like me to connect you to our agent for assistance?",
-    "hi-IN": "क्या मैं आपको सहायता के लिए हमारे एजेंट से जोड़ दूं?",
-    "ta-IN": "உதவிக்காக எங்கள் ஏஜெண்டுடன் இணைக்க விரும்புகிறீர்களா?",
-    "te-IN": "సహాయం కోసం మిమ్మల్ని మా ఏజెంట్‌తో కలిపించాలనా?",
-    "ml-IN": "സഹായത്തിന് നിങ്ങളെ ഞങ്ങളുടെ ഏജന്റുമായി ബന്ധിപ്പിക്കട്ടെയോ?",
-    "gu-IN": "શું હું તમને મદદ માટે અમારા એજન્ટ સાથે જોડું?",
-    "mr-IN": "मी तुम्हाला मदतीसाठी आमच्या एजंटशी जोडू का?",
-    "bn-IN": "আপনাকে সাহায্যের জন্য আমাদের এজেন্টের সাথে যুক্ত করব?",
-    "kn-IN": "ಸಹಾಯಕ್ಕಾಗಿ ನಾನು ನಿಮ್ಮನ್ನು ನಮ್ಮ ಏಜೆಂಟ್‌ಗೆ ಸಂಪರ್ಕ ಮಾಡಬೇಕೇ?",
-    "pa-IN": "ਕੀ ਮੈਂ ਤੁਹਾਨੂੰ ਮਦਦ ਲਈ ਸਾਡੇ ਏਜੰਟ ਨਾਲ ਜੋੜਾਂ?",
-    "or-IN": "ଆପଣଙ୍କୁ ସହାୟତା ପାଇଁ ଆମ ଏଜେଣ୍ଟ ସହିତ ଯୋଗାଯୋଗ କରିଦେବି କି?",
+    "en-IN": "Want me to loop in someone from our team who can walk you through part-pay or a fresh EMI date?",
+    "hi-IN": "चाहें तो मैं अभी हमारे टीम के किसी साथी को जोड़ दूँ, वो पार्ट पेमेंट या नई EMI डेट का आसान तरीका समझा देंगे?",
+    "ta-IN": "வேணும்னா நம்ம டீம்ல ஒருவரை லைன்ல சேர்க்கட்டுமா? அவர் part payment, புதிய due date எல்லாம் தெளிவா சொல்லிவிடுவார்.",
+    "te-IN": "వెంటనే మా టీమ్‌లోని ఓ వ్యక్తిని లైన్‌లోకి తీసుకురావాలా? ఆయన పార్ట్ పేమెంట్ లేదా కొత్త EMI తేదీల గురించి క్లియర్‌గా చెప్పేస్తారు.",
+    "ml-IN": "ഇഷ്ടമാണെങ്കിൽ ഇപ്പോൾ തന്നേ ഞങ്ങളുടെ ടീമിലെ ഒരാളെ ചേർക്കട്ടെ? അവൻ ഭാഗിക പണമടക്കൽ അല്ലെങ്കിൽ പുതിയ EMI തീയതികൾ എളുപ്പത്തിൽ വിശദീകരിക്കും.",
+    "gu-IN": "ગમેતોયે હમણાં જ અમારી ટીમમાંથી એક જણને જોડું? તે ભાગ ચુકવણી કે નવી EMI તારીખ વિશે ગાઇડ કરી દેશે.",
+    "mr-IN": "हवं असेल तर आत्ताच आमच्या टीममधला एखादा सदस्य लाईनवर आणू का? तो पार्ट पेमेंट किंवा नवीन EMI तारखेबद्दल मार्गदर्शन करेल.",
+    "bn-IN": "চাইলে আমি এখনই আমাদের টিমের একজনকে যুক্ত করতে পারি, উনি পার্ট পেমেন্ট বা নতুন EMI তারিখের অপশনগুলো বুঝিয়ে দেবেন.",
+    "kn-IN": "ಇಷ್ಟ ಇದ್ದರೆ ಈಗಲೇ ನಮ್ಮ ತಂಡದೊಬ್ಬರನ್ನು ಕರೆತರುತ್ತೀನಿ, ಅವರು ಭಾಗಪಾವತಿ ಅಥವಾ ಹೊಸ EMI ದಿನಾಂಕಗಳ ಬಗ್ಗೆ ಎಲ್ಲ ಹೇಳ್ತಾರೆ.",
+    "pa-IN": "ਚਾਹੋ ਤਾਂ ਮੈਂ ਹੁਣੇ ਹੀ ਸਾਡੀ ਟੀਮ ਤੋਂ ਕਿਸੇ ਨੂੰ ਲਾਈਨ ਤੇ ਲਿਆ ਦਿਆਂ? ਉਹ part payment ਜਾਂ ਨਵੀਂ EMI ਤਾਰੀਖ ਦਾ ਸਧਾਰਨ ਰਾਹ ਦੱਸ ਦੇਵੇਗਾ.",
+    "od-IN": "ଚାହିଁଥିଲେ ମୁଁ ଏବେ ଆମ ଟିମରୁ ଜଣେ ସହକର୍ମୀଙ୍କୁ କଲ୍‌ରେ ନେଇଆସେ? ସେ ଭାଗି ପେମେଣ୍ଟ କିମ୍ବା ନୂଆ EMI ତାରିଖ ସହଜରେ ବୁଝାଇଦେବେ."
 }
 
 
 GOODBYE_TEMPLATE = {
-    "en-IN": "I understand. If you change your mind, please call us back. Thank you. Goodbye.",
-    "hi-IN": "मैं समझती हूँ। यदि आप अपना विचार बदलते हैं, तो कृपया हमें दोबारा कॉल करें। धन्यवाद। अलविदा।",
-    "ta-IN": "நான் புரிந்துகொள்கிறேன். நீங்கள் உங்கள் எண்ணத்தை மாற்றினால், தயவுசெய்து எங்களை மீண்டும் அழைக்கவும். நன்றி. விடைபெறுகிறேன்.",
-    "te-IN": "నాకు అర్థమైంది. మీరు మీ నిర్ణయాన్ని మార్చుకుంటే, దయచేసి మమ్మల్ని తిరిగి కాల్ చేయండి. ధన్యవాదాలు. వీడ్కోలు.",
-    "ml-IN": "ഞാൻ മനസ്സിലാക്കുന്നു. നിങ്ങൾ അഭിപ്രായം മാറ്റുകയാണെങ്കിൽ, ദയവായി ഞങ്ങളെ വീണ്ടും വിളിക്കുക. നന്ദി. വിട.",
-    "gu-IN": "હું સમજી છું. જો તમે તમારો વિચાર બદલો, તો કૃપા કરીને અમને ફરીથી કોલ કરો. આભાર. અલવિદા.",
-    "mr-IN": "मी समजले. तुम्ही तुमचा निर्णय बदलल्यास, कृपया आम्हाला पुन्हा कॉल करा. धन्यवाद. अलविदा.",
-    "bn-IN": "আমি বুঝতে পারছি। আপনি যদি মত পরিবর্তন করেন, অনুগ্রহ করে আমাদের আবার কল করুন। ধন্যবাদ। বিদায়।",
-    "kn-IN": "ನಾನು ಅರ್ಥಮಾಡಿಕೊಂಡೆ. ನೀವು ನಿಮ್ಮ ನಿರ್ಧಾರವನ್ನು ಬದಲಿಸಿದರೆ, ದಯವಿಟ್ಟು ನಮಗೆ ಮತ್ತೆ ಕರೆ ಮಾಡಿ. ಧನ್ಯವಾದಗಳು. ವಿದಾಯ.",
-    "pa-IN": "ਮੈਂ ਸਮਝਦੀ ਹਾਂ। ਜੇ ਤੁਸੀਂ ਆਪਣਾ ਮਨ ਬਦਲੋ, ਤਾਂ ਕਿਰਪਾ ਕਰਕੇ ਸਾਨੂੰ ਦੁਬਾਰਾ ਕਾਲ ਕਰੋ। ਧੰਨਵਾਦ। ਅਲਵਿਦਾ।",
-    "or-IN": "ମୁଁ ବୁଝିଲି। ଯଦି ଆପଣ ମନ ବଦଳାନ୍ତି, ଦୟାକରି ଆମକୁ ପୁନି କଲ୍ କରନ୍ତୁ। ଧନ୍ୟବାଦ। ବିଦାୟ।"
+    "en-IN": "Alright, no worries. If it works later, just give us a ring. Thanks for your time!",
+    "hi-IN": "ठीक है, कोई बात नहीं. जब भी सही लगे हमें कॉल कर दीजिए. धन्यवाद!",
+    "ta-IN": "சரி, கவலை வேண்டாம். பிறகு நேரம் கிடைத்தா நமக்கே ஒரு call பண்ணுங்க. நன்றி!",
+    "te-IN": "సరే, సమస్య లేదు. తర్వాత సమయం దొరికితే మాకు కాల్ చేయండి. ధన్యవాదాలు!",
+    "ml-IN": "ശരി, പ്രശ്നമില്ല. പിന്നീട് സൗകര്യം കിട്ടുമ്പോൾ ഒരു ഫോൺ തരൂ. നന്ദി!",
+    "gu-IN": "બરાબર, કોઈ ટેન્શન નહીં. પછી અનુકૂળ લાગે ત્યારે અમને ફોન કરજો. ધન્યવાદ!",
+    "mr-IN": "ठीक आहे, काही हरकत नाही. नंतर वेळ मिळाला की आम्हाला कॉल करा. धन्यवाद!",
+    "bn-IN": "ঠিক আছে, কোনো সমস্যা নেই। পরে সুবিধা মতো আমাদের একটা ফোন করে দেবেন। ধন্যবাদ!",
+    "kn-IN": "ಸರಿ, ಸಮಸ್ಯೆ ಇಲ್ಲ. ನಂತರ ಸೌಕರ್ಯ ಇದ್ದಾಗ ನಮಗೆ ಒಂದು ಕಾಲ್ ಮಾಡಿ. ಧನ್ಯವಾದಗಳು!",
+    "pa-IN": "ਠੀਕ ਹੈ, ਕੋਈ ਗੱਲ ਨਹੀਂ. ਜਦੋਂ ਵੀ ਤੁਹਾਡੇ ਲਈ ਠੀਕ ਹੋਵੇ ਸਾਨੂੰ ਇੱਕ ਕਾਲ ਕਰ ਦੇਣਾ. ਧੰਨਵਾਦ!",
+    "od-IN": "ଠିକ ଅଛି, କିଛି ଚିନ୍ତା ନାହିଁ. ପରେ ସମୟ ହେଲେ ଆମକୁ ଫୋନ କରନ୍ତୁ. ଧନ୍ୟବାଦ!"
+}
+
+SPEAK_NOW_PROMPT = {
+    "en-IN": "You can speak now.",
+    "hi-IN": "अब आप बोल सकते हैं।",
+    "ta-IN": "நீங்கள் இப்போது பேசலாம்.",
+    "te-IN": "మీరు ఇప్పుడు మాట్లాడవచ్చు.",
+    "ml-IN": "നിങ്ങൾക്ക് ഇപ്പോൾ സംസാരിക്കാം.",
+    "gu-IN": "તમે હવે બોલી શકો છો.",
+    "mr-IN": "आपण आता बोलू शकता.",
+    "bn-IN": "আপনি এখন কথা বলতে পারেন।",
+    "kn-IN": "ನೀವು ಈಗ ಮಾತನಾಡಬಹುದು.",
+    "pa-IN": "ਤੁਸੀਂ ਹੁਣ ਗੱਲ ਕਰ ਸਕਦੇ ਹੋ।",
+    "od-IN": "ଆପଣ ଏବେ କହିପାରିବେ।",
 }
 
 
 # --- TTS & Audio Helper Functions ---
 
-async def play_transfer_to_agent(websocket, customer_number: str):
-    logger.tts.info("play_transfer_to_agent")
-    transfer_text = (
-        "Please wait, we are transferring the call to an agent."
-    )
-    logger.tts.info("🔁 Converting agent transfer prompt")
-    # Using 'en-IN' for transfer prompt for consistency, but could be `call_detected_lang`
-    audio_bytes = await sarvam_handler.synthesize_tts("Please wait, we are transferring the call to an agent.", "en-IN")
-    logger.tts.info("📢 Agent transfer audio generated")
-
-    await stream_audio_to_websocket(websocket, audio_bytes)
-
-    logger.websocket.info("📞 Initiating agent call transfer")
-    # The AGENT_NUMBER should be loaded from environment variables
-    agent_number = os.getenv("AGENT_PHONE_NUMBER")
-    if customer_number and agent_number:
-        await trigger_exotel_agent_transfer(customer_number, agent_number)
-    else:
-        logger.error("Could not initiate agent transfer. Missing customer_number or agent_number.")
-
-CHUNK_SIZE = 1600
 async def stream_audio_to_websocket(websocket, audio_bytes):
-    print("stream_audio_to_websocket")
+    """Send synthesized audio to Exotel/Twilio-style passthru websocket."""
     if not audio_bytes:
-        print("[stream_audio_to_websocket] ❌ No audio bytes to stream.")
+        logger.websocket.warning("⚠️ stream_audio_to_websocket called with empty audio payload")
         return
-    #CHUNK_SIZE=1600
-    duration_ms = len(audio_bytes) / 16000 * 1000  # 16kBps → ~8kHz mono SLIN
-    for i in range(0, len(audio_bytes), CHUNK_SIZE):
-        chunk = audio_bytes[i:i + CHUNK_SIZE]
-        if not chunk:
-            continue
-        b64_chunk = base64.b64encode(chunk).decode("utf-8")
-        response_msg = {
-            "event": "media",
-            "media": {"payload": b64_chunk}
-        }
-        # Guard against sending after close
-        try:
-            state = getattr(getattr(websocket, 'client_state', None), 'name', 'CONNECTED')
-            if state not in ['CONNECTED', 'CONNECTING']:
-                print(f"[stream_audio_to_websocket] WebSocket not connected (state={state}). Stopping stream.")
-                break
-            await websocket.send_json(response_msg)
-        except Exception as _e:
-            print(f"[stream_audio_to_websocket] Send failed: {_e}")
-            break
-        await asyncio.sleep(0.02)  # simulate real-time playback
-    # Provide a tiny cushion only; chunk pacing already matched duration
-    print(f"[stream_audio_to_websocket] Streamed ~{duration_ms:.0f}ms of audio (paced)")
-    
-    # CONVERSATION FLOW FIX: Add proper pause after audio streaming to allow user processing time
-    # This ensures user has time to hear and process the audio before system starts listening
-    processing_time = max(0.5, duration_ms / 2000)  # At least 0.5s, or half the audio duration
-    await asyncio.sleep(processing_time)
-    print(f"[stream_audio_to_websocket] Provided {processing_time:.1f}s processing time after audio")
 
-async def stream_audio_to_websocket_not_working(websocket, audio_bytes):
-    CHUNK_SIZE = 8000  # Send 1 second of audio at a time
-    if not audio_bytes:
-        logger.warning("No audio bytes to stream.")
+    if websocket.client_state.name not in {"CONNECTED", "CONNECTING"}:
+        logger.websocket.warning(
+            f"⚠️ WebSocket not connected (state={websocket.client_state.name}); skipping audio stream"
+        )
         return
-    
-    # Check if WebSocket is still connected before streaming
-    if websocket.client_state.name not in ['CONNECTED', 'CONNECTING']:
-        logger.warning(f"WebSocket not connected (state: {websocket.client_state.name}). Skipping audio stream.")
-        return
-    
+
+    stream_sid = getattr(websocket, "stream_sid", None) or "default"
+    track = getattr(websocket, "stream_track", "outbound")
+
+    chunk_size = 1280  # 80ms at 16kHz mono 16-bit PCM (increased from 20ms to 80ms for smoother streaming)
+    total_chunks = (len(audio_bytes) + chunk_size - 1) // chunk_size
+    logger.websocket.info(
+        f"📡 Streaming {len(audio_bytes)} bytes over websocket in {total_chunks} chunks (streamSid={stream_sid})"
+    )
+
     try:
-        logger.websocket.info(f"📡 Starting audio stream: {len(audio_bytes)} bytes in {len(audio_bytes)//CHUNK_SIZE + 1} chunks")
-        
-        for i in range(0, len(audio_bytes), CHUNK_SIZE):
-            # Check connection state before each chunk
-            if websocket.client_state.name != 'CONNECTED':
-                logger.warning(f"WebSocket disconnected during streaming (state: {websocket.client_state.name}). Stopping audio stream.")
-                break
-                
-            chunk = audio_bytes[i:i + CHUNK_SIZE]
+        for index in range(total_chunks):
+            offset = index * chunk_size
+            chunk = audio_bytes[offset:offset + chunk_size]
             if not chunk:
                 continue
-            b64_chunk = base64.b64encode(chunk).decode("utf-8")
-            response_msg = {
+
+            if len(chunk) < chunk_size:
+                chunk = chunk + b"\x00" * (chunk_size - len(chunk))
+
+            payload = base64.b64encode(chunk).decode("ascii")
+            message = {
                 "event": "media",
-                "media": {"payload": b64_chunk}
+                "streamSid": stream_sid,
+                "media": {
+                    "track": track,
+                    "chunk": str(index + 1),
+                    "timestamp": str(index * 20),  # ms assuming 20ms per chunk
+                    "payload": payload,
+                },
             }
-            await websocket.send_json(response_msg)
-            await asyncio.sleep(float(CHUNK_SIZE) / 16000.0) # Sleep for the duration of the audio chunk
-            
-        logger.websocket.info("✅ Audio stream completed successfully")
-    except Exception as e:
-        logger.error(f"Error streaming audio to WebSocket: {e}")
+
+            try:
+                await websocket.send_json(message)
+            except WebSocketDisconnect:
+                logger.websocket.warning("⚠️ WebSocket disconnected during audio stream; stopping playback")
+                return
+            except RuntimeError as runtime_err:
+                logger.websocket.warning(f"⚠️ WebSocket send failed (runtime error: {runtime_err}); stopping playback")
+                return
+
+            # Stop if websocket transitioned to closed states
+            if websocket.client_state.name not in {"CONNECTED", "CONNECTING"}:
+                logger.websocket.info(f"ℹ️ WebSocket state changed to {websocket.client_state.name}; ending audio stream")
+                return
+
+            # Adjust sleep time based on chunk size (80ms chunks)
+            await asyncio.sleep(0.075)  # Slightly less than chunk duration to account for processing
+
+        # Calculate buffer time based on audio duration (5% of total duration, min 100ms, max 1.5s)
+        audio_duration = len(audio_bytes) / 32000.0  # 16kHz, 16-bit mono = 32000 bytes per second
+        buffer_time = min(1.5, max(0.1, audio_duration * 0.05))
+        if buffer_time > 0:
+            await asyncio.sleep(buffer_time)
+
+        # Signal end-of-audio to the remote media stream so it can reopen the mic
+        try:
+            mark_message = {
+                "event": "mark",
+                "streamSid": stream_sid,
+                "mark": {"name": "audio_complete"},
+            }
+            await websocket.send_json(mark_message)
+            logger.websocket.debug("📍 Sent audio_complete mark to stream")
+        except (WebSocketDisconnect, RuntimeError):
+            logger.websocket.debug("ℹ️ Unable to send audio_complete mark; websocket already closed")
+
+        logger.websocket.info("✅ Completed audio stream over websocket")
+    except WebSocketDisconnect:
+        logger.websocket.warning("⚠️ WebSocket disconnected while streaming; audio truncated")
+    except RuntimeError as runtime_err:
+        logger.websocket.warning(f"⚠️ RuntimeError while streaming audio: {runtime_err}")
+    except Exception as exc:
+        logger.error.error(f"❌ Error streaming audio to websocket: {exc}")
         raise
+
+async def play_transfer_to_agent(websocket, customer_number: str, call_sid: str, customer_name: str = None):
+    """
+    Plays a transfer message to the customer, then triggers Exotel agent transfer.
+    Updates DB and notifies frontend.
+    """
+    try:
+        logger.websocket.info(f"🤝 Starting agent transfer for CallSid={call_sid}, Customer={customer_number}")
+
+        # 1. Play transfer message via TTS
+        transfer_message = "Please wait while I transfer your call to an agent."
+        await play_audio_message(websocket, transfer_message, language_code="en-IN")
+        await asyncio.sleep(2)  # allow message to play
+
+        # 2. Get agent number from environment
+        agent_number = os.getenv("AGENT_PHONE_NUMBER")
+        if not agent_number:
+            logger.error.error("❌ No AGENT_PHONE_NUMBER set in environment variables")
+            return
+
+        # 3. Trigger Exotel transfer
+        await trigger_exotel_agent_transfer(customer_number, agent_number)
+        logger.websocket.info(f"📞 Exotel agent transfer initiated: {customer_number} → {agent_number}")
+
+        # 4. Update DB with agent transfer status
+        session = db_manager.get_session()
+        customer_id_event: Optional[str] = None
+        try:
+            call_session = update_call_status(
+                session=session,
+                call_sid=call_sid,
+                status=CallStatus.AGENT_TRANSFER,
+                message=f"Agent transfer initiated for {customer_name or customer_number}",
+                extra_data={"agent_number": agent_number}
+            )
+
+            if call_session and call_session.customer_id:
+                customer_id_event = str(call_session.customer_id)
+                update_customer_call_status(
+                    session,
+                    customer_id_event,
+                    CallStatus.AGENT_TRANSFER
+                )
+
+            logger.database.info(f"✅ DB updated with AGENT_TRANSFER for CallSid {call_sid}")
+        finally:
+            session.close()
+
+        # 5. Notify frontend (dashboard) about transfer
+        try:
+            await push_status_update(
+                call_sid,
+                "agent_transfer",
+                "Agent transfer initiated after answering",
+                customer_id=customer_id_event,
+            )
+            logger.websocket.info("📡 Agent transfer event published to frontend")
+        except Exception as e:
+            logger.websocket.error(f"❌ Failed to notify frontend about agent transfer: {e}")
+
+    except Exception as e:
+        logger.error.error(f"❌ play_transfer_to_agent failed: {e}")
+
+
+# --- Language and Intent Detection ---
+
+def _is_devanagari(text):
+    """Check if text contains Devanagari characters."""
+    devanagari_range = '\u0900-\u097F'
+    return bool(re.search(f'[{devanagari_range}]', text))
+
+
+def _is_tamil(text):
+    """Check if text contains Tamil characters."""
+    tamil_range = '\u0B80-\u0BFF'
+    return bool(re.search(f'[{tamil_range}]', text))
+
+
+def _is_telugu(text):
+    """Check if text contains Telugu characters."""
+    telugu_range = '\u0C00-\u0C7F'
+    return bool(re.search(f'[{telugu_range}]', text))
+
+
+def _is_kannada(text):
+    """Check if text contains Kannada characters."""
+    kannada_range = '\u0C80-\u0CFF'
+    return bool(re.search(f'[{kannada_range}]', text))
+
+
+def _is_malayalam(text):
+    """Check if text contains Malayalam characters."""
+    malayalam_range = '\u0D00-\u0D7F'
+    return bool(re.search(f'[{malayalam_range}]', text))
+
+
+def _is_gujarati(text):
+    """Check if text contains Gujarati characters."""
+    gujarati_range = '\u0A80-\u0AFF'
+    return bool(re.search(f'[{gujarati_range}]', text))
+
+
+def _is_marathi(text):
+    """Check if text contains Marathi characters (same as Devanagari)."""
+    return _is_devanagari(text)
+
+
+def _is_bengali(text):
+    """Check if text contains Bengali characters."""
+    bengali_range = '\u0980-\u09FF'
+    return bool(re.search(f'[{bengali_range}]', text))
+
+
+def _is_punjabi(text):
+    """Check if text contains Gurmukhi (Punjabi) characters."""
+    gurmukhi_range = '\u0A00-\u0A7F'
+    return bool(re.search(f'[{gurmukhi_range}]', text))
+
+
+def _is_oriya(text):
+    """Check if text contains Odia (Oriya) characters."""
+    oriya_range = '\u0B00-\u0B7F'
+    return bool(re.search(f'[{oriya_range}]', text))
+
+
+def detect_language(text: str) -> str:
+    """
+    Detect the language of the given text based on script.
+    Returns ISO 639-1 language code with region (e.g., 'en-IN', 'hi-IN').
+    """
+    if not text or not isinstance(text, str):
+        return "en-IN"  # Default to English if no text
+    
+    # Check for different scripts
+    if _is_devanagari(text):
+        return "hi-IN"  # Hindi (also covers Marathi, Nepali, etc.)
+    elif _is_tamil(text):
+        return "ta-IN"  # Tamil
+    elif _is_telugu(text):
+        return "te-IN"  # Telugu
+    elif _is_kannada(text):
+        return "kn-IN"  # Kannada
+    elif _is_malayalam(text):
+        return "ml-IN"  # Malayalam
+    elif _is_gujarati(text):
+        return "gu-IN"  # Gujarati
+    elif _is_bengali(text):
+        return "bn-IN"  # Bengali
+    elif _is_punjabi(text):
+        return "pa-IN"  # Punjabi (Gurmukhi)
+    elif _is_oriya(text):
+        return "or-IN"  # Odia (Oriya)
+    
+    # Default to English if no script detected
+    return "en-IN"
+
+async def stream_audio_to_websocket_not_working(websocket, audio_bytes):
+    # Legacy wrapper retained for backward compatibility; delegates to the new implementation.
+    await stream_audio_to_websocket(websocket, audio_bytes)
+
+
+async def detect_intent_with_claude(transcript: str, lang: str) -> str:
+    """
+    Detect intent for agent handoff using Claude via Bedrock.
+    Returns 'affirmative'|'negative'|'unclear'.
+    """
+    try:
+        # Prepare the prompt for Claude
+        prompt = f"""
+        Analyze the following customer statement and determine if they want to:
+        1. Speak to a human agent (affirmative)
+        2. Do not want to speak to an agent (negative)
+        3. Are unclear in their response (unclear)
+        
+        Customer: "{transcript}"
+        
+        Respond with ONLY one of these exact words: affirmative, negative, or unclear
+        """
+        
+        # Call Claude
+        response = await bedrock_client.invoke_model(
+            model_id=CLAUDE_MODEL_ID,
+            body={
+                "prompt": prompt,
+                "max_tokens_to_sample": 50,
+                "temperature": 0.3,
+            }
+        )
+        
+        # Parse the response
+        intent = response.get("completion", "").strip().lower()
+        
+        # Validate the response
+        if intent in ["affirmative", "negative", "unclear"]:
+            return intent
+        
+        logger.warning(f"Unexpected intent response from Claude: {intent}")
+        return "unclear"
+        
+    except Exception as e:
+        logger.error(f"Error in detect_intent_with_claude: {e}")
+        return "unclear"
+
+
+def detect_intent_fur(text: str, lang: str) -> str:
+    """
+    A fallback intent detection function.
+    This is a simple keyword-based approach that can be used if Claude is not available.
+    """
+    if not text:
+        return "unclear"
+    
+    text_lower = text.lower()
+    
+    # Affirmative patterns
+    affirmative_patterns = [
+        r'\byes\b', r'\byeah\b', r'\bya\b', r'\byep\b', r'\bsure\b',
+        r'\bok\b', r'\bokay\b', r'\bplease\b', r'\bgo ahead\b',
+        r'\bconnect\b', r'\btransfer\b', r'\bspeak to\b', r'\btalk to\b',
+        r'\bagent\b', r'\bhuman\b', r'\bperson\b', r'\brepresentative\b',
+        r'\bmanager\b', r'\bsupervisor\b', r'\bhelp\b', r'\bassist\b'
+    ]
+    
+    # Negative patterns
+    negative_patterns = [
+        r'\bno\b', r'\bnope\b', r'\bnah\b', r'\bnot now\b',
+        r'\bnot interested\b', r'\bno thanks\b', r'\bno thank you\b',
+        r'\bnot needed\b', r'\bnot necessary\b', r'\bdont need\b',
+        r'\bdon\'t need\b', r'\bnot now\b', r'\bmaybe later\b',
+        r'\bcall back\b', r'\bnot now\b', r'\bnot today\b'
+    ]
+    
+    # Check for affirmative patterns
+    for pattern in affirmative_patterns:
+        if re.search(pattern, text_lower):
+            return "affirmative"
+    
+    # Check for negative patterns
+    for pattern in negative_patterns:
+        if re.search(pattern, text_lower):
+            return "negative"
+    
+    # If no clear intent, return unclear
+    return "unclear"
+
+
+def detect_intent(text: str) -> str:
+    """
+    Wrapper function to detect intent using the available methods.
+    Defaults to the simple keyword-based approach.
+    """
+    # First try the simple keyword-based approach
+    intent = detect_intent_fur(text, "")
+    
+    # If unclear, we could try Claude here if available
+    if intent == "unclear" and os.getenv("USE_CLAUDE_FOR_INTENT", "").lower() == "true":
+        # Note: In a real implementation, you would await this coroutine
+        # For now, we'll just log and return the simple intent
+        logger.debug("Claude intent detection is available but not used in this context")
+    
+    return intent
+
+
+# Transcript logging configuration
+base_transcript_dir = Path(os.getenv("VOICEBOT_RUNTIME_DIR") or Path(__file__).resolve().parent)
+base_transcript_dir = base_transcript_dir.expanduser()
+try:
+    base_transcript_dir.mkdir(parents=True, exist_ok=True)
+except Exception as transcript_dir_err:
+    fallback_dir = Path(tempfile.gettempdir()) / "voicebot_transcripts"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    logger.app.warning(
+        f"⚠️ Could not create transcript directory at {base_transcript_dir}: {transcript_dir_err}. "
+        f"Falling back to {fallback_dir}"
+    )
+    base_transcript_dir = fallback_dir
+
+transcripts_file_env = os.getenv("TRANSCRIPTS_FILE")
+if transcripts_file_env:
+    TRANSCRIPTS_FILE_PATH = Path(transcripts_file_env).expanduser()
+else:
+    TRANSCRIPTS_FILE_PATH = base_transcript_dir / "transcripts.txt"
+
+logger.app.info(f"🗒️ Transcript log file: {TRANSCRIPTS_FILE_PATH}")
+
+
+class TranscriptLogger:
+    """Accumulates customer speech and writes to disk after silence gaps."""
+
+    def __init__(self, file_path: Path, call_sid: str, silence_gap: float = 5.0) -> None:
+        self.file_path = file_path
+        self.call_sid = call_sid
+        self.silence_gap = silence_gap
+        self.pending_segments: List[str] = []
+        self.last_speech_time: Optional[float] = None
+        self.header_written = False
+        self.customer_name: Optional[str] = None
+        self.customer_phone: Optional[str] = None
+
+    def update_customer(self, name: Optional[str] = None, phone: Optional[str] = None) -> None:
+        if name:
+            self.customer_name = name
+        if phone:
+            self.customer_phone = phone
+
+    def add_transcript(self, text: str, timestamp: Optional[float] = None) -> None:
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        self.pending_segments.append(cleaned)
+        self.last_speech_time = timestamp or time.time()
+        # Write immediately for real-time transcript updates
+        self.flush(force=True, current_time=self.last_speech_time)
+
+    def maybe_flush(self, current_time: Optional[float] = None) -> None:
+        if not self.pending_segments or not self.last_speech_time:
+            return
+        current_time = current_time or time.time()
+        if current_time - self.last_speech_time >= self.silence_gap:
+            self.flush(force=True, current_time=current_time)
+
+    def flush(self, force: bool = False, current_time: Optional[float] = None) -> None:
+        if not self.pending_segments:
+            return
+
+        current_time = current_time or time.time()
+        if not force and self.last_speech_time and (current_time - self.last_speech_time) < self.silence_gap:
+            return
+
+        entry_text = " ".join(self.pending_segments).strip()
+        if not entry_text:
+            self.pending_segments.clear()
+            return
+
+        self._ensure_header()
+        timestamp = datetime.utcnow().isoformat()
+        line = f"{timestamp} | {entry_text}\n"
+        self._write_line(line)
+        logger.websocket.info(f"📝 Transcript segment saved ({len(entry_text)} chars) for CallSid={self.call_sid}")
+        logger.call.info(
+            f"[TRANSCRIPT] CallSid={self.call_sid} | {entry_text}",
+            extra={"call_sid": self.call_sid}
+        )
+        self.pending_segments.clear()
+        self.last_speech_time = None
+
+    def _ensure_header(self) -> None:
+        if self.header_written:
+            return
+
+        timestamp = datetime.utcnow().isoformat()
+        details = []
+        if self.customer_name:
+            details.append(f"Customer: {self.customer_name}")
+        if self.customer_phone:
+            details.append(f"Phone: {self.customer_phone}")
+
+        header_main = f"\n=== Call {self.call_sid} | Started {timestamp}"
+        if details:
+            header_main += " | " + " | ".join(details)
+        header = header_main + " ===\n"
+        self._write_line(header)
+        self.header_written = True
+
+    def _write_line(self, text: str) -> None:
+        try:
+            self.file_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.file_path.open("a", encoding="utf-8") as file:
+                file.write(text)
+        except Exception as exc:
+            logger.error.error(f"❌ Failed to write transcript log: {exc}")
+
+
+def parse_claude_response(raw: str) -> tuple[str, str]:
+    """Parse Claude's response into text and status.
+    
+    Args:
+        raw: Raw response from Claude
+        
+    Returns:
+        Tuple of (response_text, status) where status is one of:
+        - 'continue': Normal response, continue conversation
+        - 'promise': Customer made a payment promise
+        - 'escalate': Escalate to human agent
+    """
+    if not raw:
+        return "", "continue"
+    text = raw.strip()
+    
+    # Check for status in brackets at the end of the response
+    bracket_pattern = r"\[(continue|promise|escalate)\]\s*$"
+    match = re.search(bracket_pattern, text, re.IGNORECASE)
+    if match:
+        status = match.group(1).lower()
+        response = text[:match.start()].strip()
+        return response, status
+    
+    # Check for JSON response
+    try:
+        data = json.loads(text)
+        resp = data.get("response")
+        status = data.get("status", "continue")
+        
+        # Validate response types
+        if not isinstance(resp, str):
+            resp = text
+        if not isinstance(status, str):
+            status = "continue"
+            
+        status = status.lower()
+        if status not in {"continue", "promise", "escalate"}:
+            status = "continue"
+            
+        return resp.strip(), status
+    except json.JSONDecodeError:
+        logger.websocket.warning("⚠️ Claude returned text without status tag; defaulting to continue")
+        return text, "continue"
+
+
+# Audio streaming configuration
+CHUNK_SIZE = 3200  # Increased chunk size for better performance
+SAMPLE_RATE = 16000  # 16kHz sample rate
+BYTES_PER_SAMPLE = 2  # 16-bit audio
+CHANNELS = 1  # Mono audio
+AUDIO_FORMAT = 'slin'  # Signed linear PCM
+
+# Audio state management
+class AudioState:
+    """Manages audio state for a call."""
+    def __init__(self, call_sid: str):
+        self.call_sid = call_sid
+        self.audio_buffer = bytearray()
+        self.last_audio_time = time.time()
+        self.silence_duration = 0
+        self.is_speaking = False
+        self.last_interaction_time = time.time()
+        self.utterance_start_time = None
+        self.utterance_buffer = []
+        self.utterance_start_sample = 0
+        self.sample_count = 0
+        self.vad = webrtcvad.Vad(3)  # Aggressiveness mode 3 (highest)
+        self.sample_rate = 16000
+        self.frame_duration = 30  # ms
+        self.samples_per_frame = int(self.sample_rate * self.frame_duration / 1000) * 2  # 16-bit samples
+
+    def add_audio(self, audio_data: bytes) -> None:
+        """Add audio data to the buffer."""
+        self.audio_buffer.extend(audio_data)
+        self.last_audio_time = time.time()
+        
+        # Process audio for voice activity detection
+        self._process_audio_for_vad(audio_data)
+    
+    def _process_audio_for_vad(self, audio_data: bytes) -> None:
+        """Process audio data for voice activity detection."""
+        # Process in chunks of the right size for VAD
+        frame_size = self.samples_per_frame
+        for i in range(0, len(audio_data), frame_size):
+            frame = audio_data[i:i + frame_size]
+            if len(frame) < frame_size:
+                continue  # Skip incomplete frames
+                
+            # Check if this frame contains speech
+            is_speech = self.vad.is_speech(frame, self.sample_rate)
+            self.sample_count += 1
+            
+            if is_speech:
+                self.silence_duration = 0
+                if not self.is_speaking:
+                    self.is_speaking = True
+                    self.utterance_start_time = time.time()
+                    self.utterance_start_sample = self.sample_count
+                    logger.debug(f"Speech started at sample {self.utterance_start_sample}")
+            else:
+                self.silence_duration += 1
+                if self.is_speaking and self.silence_duration >= 3:  # 90ms of silence
+                    self.is_speaking = False
+                    utterance_end_sample = self.sample_count
+                    utterance_duration = (utterance_end_sample - self.utterance_start_sample) * self.frame_duration / 1000.0
+                    logger.debug(f"Speech ended at sample {utterance_end_sample}, duration: {utterance_duration:.2f}s")
+    
+    def get_audio_chunk(self, chunk_size: int = CHUNK_SIZE) -> Optional[bytes]:
+        """Get a chunk of audio data from the buffer."""
+        if len(self.audio_buffer) >= chunk_size:
+            chunk = bytes(self.audio_buffer[:chunk_size])
+            self.audio_buffer = self.audio_buffer[chunk_size:]
+            return chunk
+        return None
+    
+    def clear(self) -> None:
+        """Clear the audio buffer."""
+        self.audio_buffer = bytearray()
+        self.silence_duration = 0
+        self.is_speaking = False
+        self.utterance_buffer = []
+        self.utterance_start_sample = 0
+        self.sample_count = 0
+
+async def is_websocket_connected(websocket) -> bool:
+    """Check if WebSocket is still connected and healthy."""
+    try:
+        if not websocket or not hasattr(websocket, 'client_state'):
+            return False
+        
+        # Get WebSocket state safely
+        state = getattr(websocket.client_state, 'name', 'UNKNOWN')
+        return state in ['CONNECTED', 'CONNECTING']
+    except Exception as e:
+        logger.audio.error(f"Error checking WebSocket state: {str(e)}")
+        return False
+
+async def stream_audio_to_websocket(websocket, audio_bytes):
+    """Send synthesized audio to Exotel/Twilio-style passthru websocket."""
+    if not audio_bytes:
+        logger.websocket.warning("⚠️ stream_audio_to_websocket called with empty audio payload")
+        return
+
+    if websocket.client_state.name not in {"CONNECTED", "CONNECTING"}:
+        logger.websocket.warning(
+            f"⚠️ WebSocket not connected (state={websocket.client_state.name}); skipping audio stream"
+        )
+        return
+
+    stream_sid = getattr(websocket, "stream_sid", None) or "default"
+    track = getattr(websocket, "stream_track", "outbound")
+
+    chunk_size = 1280  # 80ms at 16kHz mono 16-bit PCM (increased from 20ms to 80ms for smoother streaming)
+    total_chunks = (len(audio_bytes) + chunk_size - 1) // chunk_size
+    logger.websocket.info(
+        f"📡 Streaming {len(audio_bytes)} bytes over websocket in {total_chunks} chunks (streamSid={stream_sid})"
+    )
+
+    try:
+        for index in range(total_chunks):
+            offset = index * chunk_size
+            chunk = audio_bytes[offset:offset + chunk_size]
+            if not chunk:
+                continue
+
+            if len(chunk) < chunk_size:
+                chunk = chunk + b"\x00" * (chunk_size - len(chunk))
+
+            payload = base64.b64encode(chunk).decode("ascii")
+            message = {
+                "event": "media",
+                "streamSid": stream_sid,
+                "media": {
+                    "track": track,
+                    "chunk": str(index + 1),
+                    "timestamp": str(index * 20),  # ms assuming 20ms per chunk
+                    "payload": payload,
+                },
+            }
+
+            try:
+                await websocket.send_json(message)
+            except WebSocketDisconnect:
+                logger.websocket.warning("⚠️ WebSocket disconnected during audio stream; stopping playback")
+                return
+            except RuntimeError as runtime_err:
+                logger.websocket.warning(f"⚠️ WebSocket send failed (runtime error: {runtime_err}); stopping playback")
+                return
+
+            # Stop if websocket transitioned to closed states
+            if websocket.client_state.name not in {"CONNECTED", "CONNECTING"}:
+                logger.websocket.info(f"ℹ️ WebSocket state changed to {websocket.client_state.name}; ending audio stream")
+                return
+
+            # Adjust sleep time based on chunk size (80ms chunks)
+            await asyncio.sleep(0.075)  # Slightly less than chunk duration to account for processing
+
+        # Calculate buffer time based on audio duration (5% of total duration, min 100ms, max 1.5s)
+        audio_duration = len(audio_bytes) / 32000.0  # 16kHz, 16-bit mono = 32000 bytes per second
+        buffer_time = min(1.5, max(0.1, audio_duration * 0.05))
+        if buffer_time > 0:
+            await asyncio.sleep(buffer_time)
+
+        # Signal end-of-audio to the remote media stream so it can reopen the mic
+        try:
+            mark_message = {
+                "event": "mark",
+                "streamSid": stream_sid,
+                "mark": {"name": "audio_complete"},
+            }
+            await websocket.send_json(mark_message)
+            logger.websocket.debug("📍 Sent audio_complete mark to stream")
+        except (WebSocketDisconnect, RuntimeError):
+            logger.websocket.debug("ℹ️ Unable to send audio_complete mark; websocket already closed")
+
+        logger.websocket.info("✅ Completed audio stream over websocket")
+    except WebSocketDisconnect:
+        logger.websocket.warning("⚠️ WebSocket disconnected while streaming; audio truncated")
+    except RuntimeError as runtime_err:
+        logger.websocket.warning(f"⚠️ RuntimeError while streaming audio: {runtime_err}")
+    except Exception as exc:
+        logger.error.error(f"❌ Error streaming audio to websocket: {exc}")
+        raise
+
 
 async def greeting_template_play(websocket, customer_info, lang: str):
     """Plays the personalized greeting in the detected language."""
@@ -344,6 +1368,58 @@ async def play_goodbye_after_decline(websocket, lang: str):
     logger.tts.info(f"🔁 Converting goodbye after decline: {prompt_text}")
     audio_bytes = await sarvam_handler.synthesize_tts(prompt_text, lang)
     await stream_audio_to_websocket(websocket, audio_bytes)
+
+async def play_speak_now_prompt(websocket, lang: str) -> None:
+    """Tells the caller they can start speaking now."""
+    prompt_text = SPEAK_NOW_PROMPT.get(lang, SPEAK_NOW_PROMPT["en-IN"])
+    logger.tts.info(f"🔁 Converting speak-now prompt: {prompt_text}")
+    audio_bytes = await sarvam_handler.synthesize_tts(prompt_text, lang)
+    if not audio_bytes:
+        logger.tts.error("❌ Speak-now prompt synthesis returned no audio")
+        return
+    await stream_audio_to_websocket(websocket, audio_bytes)
+
+def _loan_suffix(loan_id: Optional[str]) -> str:
+    if not loan_id:
+        return "unknown"
+    digits = "".join(ch for ch in str(loan_id) if ch.isdigit())
+    if not digits:
+        digits = str(loan_id)
+    return digits[-4:] if len(digits) >= 4 else digits
+
+async def play_confirmation_prompt(websocket, customer_info: Dict[str, Any]) -> None:
+    name = customer_info.get("name") or "there"
+    loan_suffix = _loan_suffix(customer_info.get("loan_id"))
+    prompt = (
+        f"Hello {name}. I am a voice agent calling from a bank. "
+        f"Am I speaking with {name} with the loan ID ending in {loan_suffix}?"
+    )
+    logger.tts.info(f"🔁 Confirmation prompt: {prompt}")
+    audio_bytes = await sarvam_handler.synthesize_tts(prompt, "en-IN")
+    await stream_audio_to_websocket(websocket, audio_bytes)
+
+async def play_connecting_prompt(websocket, language: str = "en-IN") -> None:
+    prompt = "Wait a second, I will connect you to our agent."
+    logger.tts.info(f"🔁 Connecting prompt: {prompt}")
+    audio_bytes = await sarvam_handler.synthesize_tts(prompt, language or "en-IN")
+    await stream_audio_to_websocket(websocket, audio_bytes)
+
+async def play_sorry_prompt(websocket) -> None:
+    prompt = "Sorry for the mistake. Thank you."
+    logger.tts.info(f"🔁 Sorry prompt: {prompt}")
+    audio_bytes = await sarvam_handler.synthesize_tts(prompt, "en-IN")
+    await stream_audio_to_websocket(websocket, audio_bytes)
+
+async def play_repeat_prompt(websocket, customer_info: Dict[str, Any]) -> None:
+    name = customer_info.get("name") or "there"
+    loan_suffix = _loan_suffix(customer_info.get("loan_id"))
+    prompt = (
+        f"I am sorry, I did not catch that. Am I speaking with {name} with the loan ID ending in {loan_suffix}?"
+    )
+    logger.tts.info(f"🔁 Repeat prompt: {prompt}")
+    audio_bytes = await sarvam_handler.synthesize_tts(prompt, "en-IN")
+    await stream_audio_to_websocket(websocket, audio_bytes)
+
 
 # --- Language and Intent Detection ---
 def _is_devanagari(text): return any('\u0900' <= ch <= '\u097F' for ch in text)
@@ -501,8 +1577,12 @@ def detect_intent_strict(text):
 
 
 def detect_intent(text):
-    """Legacy function - redirects to strict detection"""
-    return detect_intent_strict(text)
+    text = text.lower()
+    if any(word in text for word in ["agent", "live agent", "speak to someone", "transfer", "help desk"]): return "agent_transfer"
+    if any(word in text for word in ["yes", "yeah", "sure", "okay", "haan", "ஆம்", "அவுனு", "हॉं", "ಹೌದು", "please"]): return "affirmative"
+    if any(word in text for word in ["no", "not now", "later", "nah", "nahi", "இல்லை", "காது", "ನಹಿ"]): return "negative"
+    if any(word in text for word in ["what", "who", "why", "repeat", "pardon"]): return "confused"
+    return "unknown"
 
 # --- State to Language Mapping ---
 STATE_TO_LANGUAGE = {
@@ -962,559 +2042,602 @@ async def test_passthru_handler():
         "passthru_url": "https://4ee3feb8d5e0.ngrok-free.app/passthru-handler",
         "instructions": "Add this URL to your Exotel Flow Passthru applet"
     }
+async def play_audio_message(websocket, text: str, language_code: str = "en-IN"):
+    """
+    Convert text to speech and send it to Exotel passthru stream.
+    """
+    try:
+        logger.websocket.info(f"🗣️ Playing audio message: {text}")
 
-# --- WebSocket Endpoint for Voicebot ---
+        # Generate speech (replace with your actual TTS call)
+        audio_data = await synthesize_speech(text, language_code)
+
+        if not audio_data:
+            logger.error.error("❌ TTS synthesis failed, no audio generated")
+            return
+
+        # Send audio chunks to Exotel via websocket
+        await websocket.send_bytes(audio_data)
+        logger.websocket.info("✅ Audio message sent to Exotel stream")
+
+    except Exception as e:
+        logger.error.error(f"❌ Failed to play audio message: {e}")
+
+#Newly added...
 async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_call_id: str = None, call_sid: str = None, phone: str = None):
-    """
-    Core voicebot WebSocket handling logic - extracted to be reusable.
-    """
+    await run_voice_session(
+        websocket=websocket,
+        session_id=session_id,
+        temp_call_id=temp_call_id,
+        call_sid=call_sid,
+        phone=phone,
+        compat_mode=False,
+    )
+
+async def run_voice_session(
+    websocket: WebSocket,
+    session_id: str,
+    temp_call_id: Optional[str],
+    call_sid: Optional[str],
+    phone: Optional[str],
+    compat_mode: bool = False,
+) -> None:
     logger.websocket.info(f"✅ Connected to Exotel Voicebot for session: {session_id}")
-
-    # Initialize variables from parameters
     if not call_sid:
-        call_sid = session_id  # Use session_id as a fallback for call_sid
+        call_sid = session_id
 
-    logger.websocket.info(f"Session params: temp_call_id={temp_call_id}, call_sid={call_sid}, phone={phone}")
+    transcript_logger = TranscriptLogger(TRANSCRIPTS_FILE_PATH, call_sid)
 
-    # State variable for the conversation stage
-    conversation_stage = "INITIAL_GREETING" # States: INITIAL_GREETING, WAITING_FOR_CONFIRMATION, WAITING_FOR_LANG_DETECT, PLAYING_EMI_DETAILS, ASKING_AGENT_CONNECT, WAITING_AGENT_RESPONSE, TRANSFERRING_TO_AGENT, GOODBYE_DECLINE
-    call_detected_lang = "en-IN" # Default language, will be updated after first user response
+    conversation_stage = "AWAIT_START"  # AWAIT_START → WAITING_CONFIRMATION → CLAUDE_CHAT/GOODBYE_SENT/WAITING_DISCONNECT
     audio_buffer = bytearray()
     last_transcription_time = time.time()
-    interaction_complete = False # Flag to stop processing media after the main flow ends
-    customer_info = None # Will be set when we get customer data
-    initial_greeting_played = False # Track if initial greeting was played
-    agent_question_repeat_count = 0 # Track how many times agent question was repeated
-    confirmation_attempts = 0 # Track confirmation attempts
+    customer_info: Optional[Dict[str, Any]] = None
+    confirmation_attempts = 0
+    claude_chat = None
+    claude_turns = 0
+    refusal_count = 0
+    interaction_complete = False
+    current_language = "en-IN"
+
+    async def speak_text(text: str, language: Optional[str] = None) -> None:
+        if not text:
+            return
+        lang_code = language or current_language or "en-IN"
+        audio_bytes = await sarvam_handler.synthesize_tts(text, lang_code)
+        if audio_bytes:
+            await stream_audio_to_websocket(websocket, audio_bytes)
+
+    def sanitize_phone(raw: Optional[str]) -> Optional[str]:
+        if not raw:
+            return None
+        return ''.join(ch for ch in raw if ch.isdigit())
+
+    def parse_custom_field(value: str) -> Dict[str, str]:
+        result: Dict[str, str] = {}
+        for part in value.split('|'):
+            if '=' in part:
+                key, val = part.split('=', 1)
+                result[key.strip()] = val.strip()
+        return result
+
+    def ensure_customer_info(info: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not info:
+            return None
+        if not info.get('name'):
+            return None
+        if not info.get('loan_id'):
+            info['loan_id'] = 'unknown'
+        if not info.get('amount'):
+            info['amount'] = 'the outstanding amount'
+        if not info.get('due_date'):
+            info['due_date'] = 'the due date'
+        if not info.get('lang'):
+            info['lang'] = 'en-IN'
+        return info
+
+    def format_amount(value: Optional[str]) -> str:
+        if not value:
+            return "the outstanding amount"
+        cleaned = ''.join(ch for ch in str(value) if ch.isdigit())
+        if not cleaned:
+            return str(value)
+        try:
+            num = int(cleaned)
+            return f"₹{num:,}"
+        except ValueError:
+            return str(value)
+
+    strong_refusal_phrases = [
+        "can't pay", "cannot pay", "won't pay", "will not pay", "not able to pay",
+        "unable to pay", "not going to pay", "no money to pay", "zero balance to pay",
+        "can't make the payment", "cannot make the payment", "don't have money", "don't have the money",
+        "can't settle now", "cannot settle now", "can't right now", "cannot right now",
+        "pay later", "make the payment later", "next month", "two months", "after two months",
+        "mudiyaathu", "mudiyaadhu", "mudiyathu", " முடியாது", "illai", "illa", "வேண்டாம்", "vendam",
+        "nahi kar paunga", "nahi kar sakta", "nahin kar paunga", "nahin kar sakta", "paisa nahi", "paise nahi",
+        "nahi dunga", "nahin dunga", "nahi doonga", "nahin doonga",
+        "cheyalenu", "చేయలేను", "కాదు", "నాకు డబ్బు లేదు",
+        "maadu aagala", "ಮಾಡಲಾಗುವುದಿಲ್ಲ", "ಬೇಡ"
+    ]
+    basic_negatives = [
+        "can't", "cannot", "won't", "will not", "not able", "unable", "no", "nah",
+        "later", "delay", "postpone", "maybe later", "not now", "another time",
+        "nahi", "nahin", "mat", "illai", "vendam", "mudiya", "cheyanu", "ledu", "illa"
+    ]
+    payment_terms = [
+        "pay", "payment", "amount", "money", "emi", "due", "settle", "installment", "loan", "balance",
+        "paisa", "paise", "panam", "selavu", "kattan", "rakam", "dabbu"
+    ]
+
+    def is_refusal_statement(text: str) -> bool:
+        if not text:
+            return False
+        normalized = text.lower()
+        if any(phrase in normalized for phrase in strong_refusal_phrases):
+            return True
+        if any(term in normalized for term in payment_terms) and any(neg in normalized for neg in basic_negatives):
+            return True
+        return False
+
+    async def resolve_customer_from_db(raw_phone: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not raw_phone:
+            return None
+        try:
+            from database.schemas import get_customer_by_phone
+            session = db_manager.get_session()
+            try:
+                candidates = set()
+                digits = sanitize_phone(raw_phone)
+                if digits:
+                    candidates.update({digits, digits[-10:]})
+                    candidates.add(f"91{digits[-10:]}")
+                    candidates.add(f"+91{digits[-10:]}")
+                candidates.add(raw_phone)
+                for candidate in candidates:
+                    customer = get_customer_by_phone(session, candidate)
+                    if customer:
+                        return {
+                            'name': customer.name,
+                            'loan_id': customer.loan_id,
+                            'amount': customer.amount,
+                            'due_date': customer.due_date,
+                            'lang': customer.language_code or 'en-IN',
+                            'phone': customer.phone_number,
+                            'state': customer.state or '',
+                        }
+            finally:
+                session.close()
+        except Exception as err:
+            logger.database.error(f"❌ Error resolving customer by phone: {err}")
+        return None
+
+    async def handle_start_event(msg: Dict[str, Any]) -> bool:
+        nonlocal call_sid, customer_info, conversation_stage, last_transcription_time, claude_chat, current_language
+
+        stream_sid = (
+            msg.get("streamSid")
+            or (msg.get("start") or {}).get("streamSid")
+            or (msg.get("start") or {}).get("stream_sid")
+        )
+        if stream_sid:
+            websocket.stream_sid = stream_sid
+            logger.websocket.info(f"🔗 streamSid set to {stream_sid}")
+        websocket.stream_track = ((msg.get("start") or {}).get("tracks") or ["outbound"])[0]
+        logger.websocket.info(f"🎧 Using track {websocket.stream_track}")
+
+        candidate_sid = (
+            (msg.get("start") or {}).get("call_sid")
+            or (msg.get("start") or {}).get("callSid")
+            or msg.get("callSid")
+            or msg.get("CallSid")
+            or msg.get("call_sid")
+            or call_sid
+        )
+        if candidate_sid:
+            call_sid = candidate_sid
+            transcript_logger.call_sid = call_sid
+            logger.websocket.info(f"🎯 Resolved CallSid: {call_sid}")
+
+        info: Optional[Dict[str, Any]] = None
+        
+        # Try to get customer data from Redis using temp_call_id or call_sid
+        session_data = None
+        if temp_call_id:
+            logger.websocket.info(f"🔍 Looking up customer data by temp_call_id: {temp_call_id}")
+            session_data = redis_manager.get_call_session(temp_call_id)
+            if session_data:
+                info = session_data.get('customer_data') or session_data
+                logger.websocket.info(f"✅ Found customer data by temp_call_id")
+        
+        if not info and call_sid:
+            logger.websocket.info(f"🔍 Looking up customer data by call_sid: {call_sid}")
+            session_data = redis_manager.get_call_session(call_sid)
+            if session_data:
+                info = session_data.get('customer_data') or session_data
+                logger.websocket.info(f"✅ Found customer data by call_sid")
+        
+        # If still no data, try to get from custom fields or phone number
+        if not info:
+            custom_field = (msg.get('customField')
+                          or (msg.get('start') or {}).get('customField')
+                          or (msg.get('start') or {}).get('custom_field'))
+        if not info and custom_field:
+            parsed = parse_custom_field(custom_field)
+            if parsed:
+                info = {
+                    'name': parsed.get('name') or parsed.get('customer_name'),
+                    'loan_id': parsed.get('loan_id'),
+                    'amount': parsed.get('amount'),
+                    'due_date': parsed.get('due_date'),
+                    'lang': parsed.get('language_code', 'en-IN'),
+                    'phone': parsed.get('phone_number') or parsed.get('phone'),
+                    'state': parsed.get('state', ''),
+                }
+
+        if not info and phone:
+            info = await resolve_customer_from_db(phone)
+
+        # Ensure we have valid customer data with required fields
+        info = ensure_customer_info(info)
+        if not info:
+            logger.websocket.error("❌ Customer data missing; attempting to use fallback data")
+            
+            # Create minimal customer info with default values
+            info = {
+                'name': 'Customer',
+                'phone': phone or 'Unknown',
+                'loan_id': 'N/A',
+                'amount': '0',
+                'due_date': 'N/A',
+                'state': '',
+                'lang': 'en-IN'
+            }
+            
+            logger.websocket.warning(f"⚠️ Using fallback customer data: {info}")
+            
+            # Store this minimal data in Redis for future reference
+            if call_sid:
+                try:
+                    redis_manager.create_call_session(
+                        call_sid=call_sid,
+                        customer_data=info,
+                        websocket_id=str(websocket)
+                    )
+                    logger.websocket.info(f"💾 Saved fallback customer data to Redis for call_sid: {call_sid}")
+                except Exception as e:
+                    logger.websocket.error(f"❌ Failed to save fallback data to Redis: {e}")
+            
+            # Continue with the minimal data instead of failing
+
+        customer_info = info
+        
+        # Ensure required fields exist with defaults
+        customer_info.setdefault('name', 'Customer')
+        customer_info.setdefault('phone', phone or 'Unknown')
+        customer_info.setdefault('loan_id', 'N/A')
+        customer_info.setdefault('amount', '0')
+        customer_info.setdefault('due_date', 'N/A')
+        customer_info.setdefault('state', '')
+        customer_info.setdefault('lang', 'en-IN')
+        
+        current_language = customer_info['lang']
+        
+        # Initialize transcript logger with customer info
+        try:
+            transcript_logger.update_customer(
+                customer_info['name'],
+                customer_info['phone']
+            )
+        except Exception as e:
+            logger.websocket.error(f"❌ Failed to update transcript logger: {e}")
+            
+        logger.websocket.info(f"👤 Customer info initialized: {customer_info}")
+
+        logger.websocket.info(
+            f"📋 Customer: {customer_info['name']} | Loan: {customer_info.get('loan_id')}"
+        )
+
+        await play_confirmation_prompt(websocket, customer_info)
+        conversation_stage = "WAITING_CONFIRMATION"
+        last_transcription_time = time.time()
+        return True
+
+    async def handle_confirmation_response(transcript: str) -> Optional[str]:
+        nonlocal conversation_stage, confirmation_attempts, claude_chat, current_language
+
+        normalized = transcript.lower()
+        affirmative = {"yes", "yeah", "yep", "haan", "ha", "correct", "sure", "yup"}
+        negative = {"no", "nah", "nope", "nahi", "na"}
+
+        is_affirmative = any(word in normalized for word in affirmative)
+        is_negative = any(word in normalized for word in negative)
+
+        if is_affirmative:
+            logger.websocket.info("✅ Customer confirmed identity")
+            await play_connecting_prompt(websocket, current_language)
+            conversation_stage = "CLAUDE_CHAT"
+            confirmation_attempts = 0
+            claude_chat = claude_chat_manager.start_session(call_sid, customer_info)
+            if claude_chat:
+                intro_prompt = (
+                    "The caller is now on the line. Introduce yourself as Priya from Intalks NGN Bank, "
+                    "briefly remind them about the overdue EMI amount of {amount}, and immediately ask "
+                    "for a concrete repayment date. Keep it under two short sentences and append a "
+                    "status tag [continue] at the end."
+                ).format(amount=format_amount(customer_info.get('amount')))
+                intro = await claude_reply(claude_chat, intro_prompt)
+                if intro:
+                    intro_text, _ = parse_claude_response(intro)
+                    if transcript_logger and intro_text:
+                        transcript_logger.add_transcript(f"[Claude] {intro_text}", time.time())
+                    if intro_text:
+                        intro_language = detect_language(intro_text)
+                        if intro_language and intro_language != current_language:
+                            logger.websocket.info(
+                                f"🌐 Switching assistant voice language {current_language} → {intro_language}"
+                            )
+                            current_language = intro_language
+                    await speak_text(intro_text, current_language)
+                logger.websocket.info("🤖 Claude session established")
+            else:
+                await speak_text("Our specialist is here. How can I assist you today?")
+                logger.websocket.warning("⚠️ Claude unavailable; using fallback persona")
+            return "affirmative"
+        if is_negative:
+            logger.websocket.info("ℹ️ Customer declined identity")
+            await play_sorry_prompt(websocket)
+            conversation_stage = "GOODBYE_SENT"
+            return "negative"
+
+        confirmation_attempts += 1
+        if confirmation_attempts >= 3:
+            await play_sorry_prompt(websocket)
+            conversation_stage = "GOODBYE_SENT"
+            return "negative"
+        await play_repeat_prompt(websocket, customer_info)
+        return None
+
+    async def handle_claude_exchange(transcript: str) -> str:
+        nonlocal claude_turns, conversation_stage, interaction_complete, refusal_count, current_language
+        if not transcript:
+            return "continue"
+        if not claude_chat:
+            await speak_text("Thank you for explaining. I'll connect you to our agent now.", "en-IN")
+            conversation_stage = "WAITING_DISCONNECT"
+            interaction_complete = True
+            return "end"
+
+        if is_refusal_statement(transcript):
+            refusal_count += 1
+            logger.websocket.info(f"🚫 Customer refusal detected (count={refusal_count})")
+
+        claude_turns += 1
+        raw_reply = await claude_reply(claude_chat, transcript)
+        if not raw_reply:
+            await speak_text("I didn't catch that. Could you please repeat?")
+            return "continue"
+
+        agent_text, status = parse_claude_response(raw_reply)
+        cleaned_agent_text = (agent_text or "").strip()
+        if status == "promise" and cleaned_agent_text.endswith("?"):
+            logger.websocket.info("ℹ️ Ignoring [promise] tag because assistant response is a question")
+            status = "continue"
+
+        allowed_to_escalate = refusal_count >= CLAUDE_REFUSAL_THRESHOLD
+        if allowed_to_escalate and status == "continue":
+            logger.websocket.info(
+                f"ℹ️ Auto-escalating after repeated refusals (count={refusal_count})"
+            )
+            agent_text = (
+                "I understand this has been difficult. I'll transfer you to our specialist for more help."
+            )
+            status = "escalate"
+        elif status == "escalate" and not allowed_to_escalate:
+            logger.websocket.info(
+                f"ℹ️ Escalation deferred (refusal_count={refusal_count} < {CLAUDE_REFUSAL_THRESHOLD}); continuing conversation"
+            )
+            status = "continue"
+
+        if transcript_logger:
+            transcript_logger.add_transcript(f"[Claude_raw] {raw_reply}", time.time())
+            transcript_logger.add_transcript(f"[Claude] {agent_text}", time.time())
+        if cleaned_agent_text:
+            detected_response_language = detect_language(cleaned_agent_text)
+            if detected_response_language and detected_response_language != current_language:
+                logger.websocket.info(
+                    f"🌐 Switching assistant voice language {current_language} → {detected_response_language}"
+                )
+                current_language = detected_response_language
+
+        if allowed_to_escalate:
+            logger.websocket.info(
+                f"ℹ️ Refusal threshold reached ({refusal_count}); skipping LLM response and transferring to agent"
+            )
+            await play_connecting_prompt(websocket, current_language)
+            conversation_stage = "WAITING_DISCONNECT"
+            interaction_complete = True
+            return "end"
+
+        await speak_text(agent_text, current_language)
+
+        if status == "promise":
+            await speak_text(
+                "Thank you for confirming the repayment. We appreciate your cooperation. Goodbye.",
+                current_language
+            )
+            conversation_stage = "GOODBYE_SENT"
+            interaction_complete = True
+            return "end"
+
+        if status == "escalate":
+            await speak_text(
+                "I understand. I'll transfer you to our agent for further assistance.",
+                current_language
+            )
+            await play_connecting_prompt(websocket, current_language)
+            conversation_stage = "WAITING_DISCONNECT"
+            interaction_complete = True
+            return "end"
+
+        if claude_turns >= MAX_CLAUDE_TURNS:
+            if allowed_to_escalate:
+                logger.websocket.info(
+                    f"ℹ️ Max Claude turns reached with refusal threshold ({refusal_count}); transferring to agent"
+                )
+                await play_connecting_prompt(websocket, current_language)
+                conversation_stage = "WAITING_DISCONNECT"
+                interaction_complete = True
+                return "end"
+            logger.websocket.info(
+                f"ℹ️ Max Claude turns reached but refusal threshold not met (count={refusal_count}); continuing"
+            )
+            claude_turns = MAX_CLAUDE_TURNS - 1
+            return "continue"
+
+        return "continue"
 
     try:
         while True:
-            data = await websocket.receive_text()
-            msg = json.loads(data)
-            logger.log_websocket_message("Received message", msg)
+            try:
+                message_text = await websocket.receive_text()
+            except WebSocketDisconnect:
+                logger.websocket.warning("⚠️ WebSocket disconnected")
+                break
 
-            if msg.get("event") == "start":
-                logger.websocket.info("🔁 Got start event")
-                
-                # Try to get customer info from multiple sources
-                if not customer_info:
-                    # 1. Try to get from Redis using temp_call_id or call_sid
-                    if temp_call_id:
-                        logger.database.info(f"Looking up customer data by temp_call_id: {temp_call_id}")
-                        redis_data = redis_manager.get_call_session(temp_call_id)
-                        if redis_data:
-                            customer_info = {
-                                'name': redis_data.get('name'),
-                                'loan_id': redis_data.get('loan_id'),
-                                'amount': redis_data.get('amount'),
-                                'due_date': redis_data.get('due_date'),
-                                'lang': redis_data.get('language_code', 'en-IN'),
-                                'phone': redis_data.get('phone_number', ''),
-                                'state': redis_data.get('state', '')
-                            }
-                            print(f"[WebSocket] ✅ Found customer data in Redis: {customer_info['name']}")
-                    
-                    elif call_sid:
-                        print(f"[WebSocket] Looking up customer data by call_sid: {call_sid}")
-                        redis_data = redis_manager.get_call_session(call_sid)
-                        if redis_data:
-                            customer_info = {
-                                'name': redis_data.get('name'),
-                                'loan_id': redis_data.get('loan_id'),
-                                'amount': redis_data.get('amount'),
-                                'due_date': redis_data.get('due_date'),
-                                'lang': redis_data.get('language_code', 'en-IN'),
-                                'phone': redis_data.get('phone_number', ''),
-                                'state': redis_data.get('state', '')
-                            }
-                            print(f"[WebSocket] ✅ Found customer data in Redis: {customer_info['name']}")
-                    
-                    elif phone:
-                        print(f"[WebSocket] Looking up customer data by phone: {phone}")
-                        # Clean phone number for lookup
-                        clean_phone = phone.replace('+', '').replace('-', '').replace(' ', '')
-                        phone_key = f"customer_phone_{clean_phone}"
-                        redis_data = redis_manager.get_temp_data(phone_key)
-                        if redis_data:
-                            customer_info = {
-                                'name': redis_data.get('name'),
-                                'loan_id': redis_data.get('loan_id'),
-                                'amount': redis_data.get('amount'),
-                                'due_date': redis_data.get('due_date'),
-                                'lang': redis_data.get('language_code', 'en-IN'),
-                                'phone': redis_data.get('phone_number', ''),
-                                'state': redis_data.get('state', '')
-                            }
-                            print(f"[WebSocket] ✅ Found customer data by phone in Redis: {customer_info['name']}")
-                
-                # 2. Try to parse CustomField data from Exotel start message (if available)
-                if not customer_info and 'customField' in msg:
-                    print("[WebSocket] Parsing CustomField from Exotel start message")
-                    try:
-                        custom_field = msg['customField']
-                        # Parse the CustomField format: "customer_id=|customer_name=Name|loan_id=LOAN123|..."
-                        parts = custom_field.split('|')
-                        custom_data = {}
-                        for part in parts:
-                            if '=' in part:
-                                key, value = part.split('=', 1)
-                                custom_data[key] = value
-                        
-                        customer_info = {
-                            'name': custom_data.get('customer_name'),
-                            'loan_id': custom_data.get('loan_id'),
-                            'amount': custom_data.get('amount'),
-                            'due_date': custom_data.get('due_date'),
-                            'lang': custom_data.get('language_code', 'en-IN'),
-                            'phone': '',
-                            'state': custom_data.get('state', '')
-                        }
-                        print(f"[WebSocket] ✅ Parsed customer data from CustomField: {customer_info['name']}")
-                    except Exception as e:
-                        print(f"[WebSocket] ❌ Error parsing CustomField: {e}")
-                
-                # 3. Try to get customer data from database by phone number (if available)
-                if not customer_info and phone:
-                    print(f"[WebSocket] Looking up customer in database by phone: {phone}")
-                    try:
-                        from database.schemas import get_customer_by_phone
-                        session = db_manager.get_session()
-                        
-                        # Clean phone number for database lookup - more comprehensive approach
-                        clean_phone = phone.replace('+', '').replace('-', '').replace(' ', '')
-                        
-                        # Extract just the 10-digit number if it's an Indian number
-                        if len(clean_phone) >= 10:
-                            last_10_digits = clean_phone[-10:]
-                        else:
-                            last_10_digits = clean_phone
-                        
-                        # Try multiple phone number formats that might be in the database
-                        possible_phones = [
-                            phone,                      # Original format
-                            clean_phone,               # Cleaned format
-                            f"+{clean_phone}",         # With + prefix
-                            f"+91{last_10_digits}",    # With +91 prefix
-                            f"91{last_10_digits}",     # With 91 prefix (no +)
-                            last_10_digits             # Just 10 digits
-                        ]
-                        
-                        # Remove duplicates and empty values
-                        possible_phones = list(set([p for p in possible_phones if p]))
-                        print(f"[WebSocket] Trying phone formats: {possible_phones}")
-                        
-                        db_customer = None
-                        for phone_variant in possible_phones:
-                            db_customer = get_customer_by_phone(session, phone_variant)
-                            if db_customer:
-                                print(f"[WebSocket] ✅ Found customer with phone variant: {phone_variant}")
-                                break
-                        
-                        if db_customer:
-                            customer_info = {
-                                'name': db_customer.name,
-                                'loan_id': db_customer.loan_id,
-                                'amount': db_customer.amount,
-                                'due_date': db_customer.due_date,
-                                'lang': db_customer.language_code or 'en-IN',
-                                'phone': db_customer.phone_number,
-                                'state': db_customer.state or ''
-                            }
-                            print(f"[WebSocket] ✅ Found customer in database: {customer_info['name']} (Phone: {customer_info['phone']})")
-                        else:
-                            print(f"[WebSocket] ❌ Customer not found in database for phone: {phone}")
-                        
-                        session.close()
-                    except Exception as e:
-                        print(f"[WebSocket] ❌ Error looking up customer in database: {e}")
-                
-                # 4. If no customer found anywhere, throw an error instead of using fallback data
-                if not customer_info:
-                    print("[WebSocket] ❌ No customer data found - cannot proceed without real customer information")
-                    await websocket.send_text(json.dumps({
-                        "event": "error",
-                        "message": "Customer data not found. Please ensure customer information is uploaded and call is triggered properly."
-                    }))
-                    return
-                
-                # 5. Validate customer data has required fields (allow placeholder values)
-                required_fields = ['name', 'loan_id', 'amount', 'due_date']
-                missing_fields = [field for field in required_fields if not customer_info.get(field)]
-                if missing_fields:
-                    print(f"[WebSocket] ❌ Customer data missing required fields: {missing_fields}")
-                    await websocket.send_text(json.dumps({
-                        "event": "error",
-                        "message": f"Customer data incomplete. Missing fields: {', '.join(missing_fields)}"
-                    }))
-                    return
-                
-                # Convert placeholder values to generic terms for speech
-                if customer_info.get('loan_id') in ['Unknown', 'N/A', None]:
-                    customer_info['loan_id'] = '1234'  # Generic loan ID for speech
-                if customer_info.get('amount') in ['Unknown', 'N/A', '₹0', None]:
-                    customer_info['amount'] = '5000'  # Generic amount for speech
-                if customer_info.get('due_date') in ['Unknown', 'N/A', None]:
-                    customer_info['due_date'] = 'this month'  # Generic due date for speech
-                
-                print(f"[WebSocket] ✅ Customer data validated: {customer_info['name']} - Loan: {customer_info['loan_id']}, Amount: ₹{customer_info['amount']}")
-                
-                # Determine initial language: prioritize state-based language over CSV language
-                customer_state = customer_info.get('state', '').strip()
-                state_based_language = get_initial_language_from_state(customer_state)
-                csv_language = customer_info.get('lang', 'en-IN')
-                
-                # Use state language for initial greeting as requested
-                initial_greeting_language = state_based_language
-                logger.websocket.info(f"State: {customer_state}, State Language: {state_based_language}, CSV Language: {csv_language}")
-                logger.websocket.info(f"Using state-based language for initial greeting: {initial_greeting_language}")
-                
-                # Play initial greeting immediately when WebSocket starts
-                if conversation_stage == "INITIAL_GREETING":
-                    logger.websocket.info(f"1. Playing initial greeting for {customer_info['name']} in {initial_greeting_language} (state-based)")
-                    try:
-                        # Use the working template approach with state-based language
-                        await greeting_template_play(websocket, customer_info, lang=initial_greeting_language)
-                        logger.websocket.info(f"✅ Initial greeting played successfully in {initial_greeting_language}")
-                        initial_greeting_played = True
-                        conversation_stage = "WAITING_FOR_CONFIRMATION"  # Wait for user to confirm they are the right person
-                        logger.websocket.info(f"🎯 Now waiting for user confirmation/response...")
-                    except Exception as e:
-                        logger.websocket.error(f"❌ Error playing initial greeting: {e}")
-                        # Try fallback simple greeting in English
-                        try:
-                            simple_greeting = f"Hello, this is South India Finvest Bank calling. Am I speaking with {customer_info['name']}?"
-                            audio_bytes = await sarvam_handler.synthesize_tts_end(simple_greeting, "en-IN")
-                            await stream_audio_to_websocket(websocket, audio_bytes)
-                            logger.websocket.info("✅ Fallback greeting sent successfully")
-                            initial_greeting_played = True
-                            conversation_stage = "WAITING_FOR_CONFIRMATION"  # Wait for user confirmation
-                            logger.websocket.info(f"🎯 Now waiting for user confirmation/response...")
-                        except Exception as fallback_e:
-                            logger.websocket.error(f"❌ Error sending fallback greeting: {fallback_e}")
+            msg = json.loads(message_text)
+            event = msg.get("event")
+            logger.websocket.info(f"📨 Event received: {event}")
+            logger.log_websocket_message(event or "unknown", msg)
+            if event == "start":
+                if not await handle_start_event(msg):
+                    interaction_complete = True
+                    break
                 continue
 
-            if msg.get("event") == "media":
-                payload_b64 = msg["media"]["payload"]
-                raw_audio = base64.b64decode(payload_b64)
+            if event == "stop":
+                logger.websocket.info("🛑 Received stop event from Exotel")
+                interaction_complete = True
+                break
 
-                if interaction_complete:
-                    continue
+            if event != "media":
+                continue
 
-                if raw_audio and any(b != 0 for b in raw_audio):
-                    audio_buffer.extend(raw_audio)
-                
-                now = time.time()
+            payload_b64 = msg["media"].get("payload")
+            raw_audio = base64.b64decode(payload_b64)
 
-                # Stage-specific buffer timeout: wait longer for agent response
-                buffer_timeout = AGENT_RESPONSE_BUFFER_DURATION if conversation_stage == "WAITING_AGENT_RESPONSE" else BUFFER_DURATION_SECONDS
+            if interaction_complete:
+                continue
+            if raw_audio and any(b != 0 for b in raw_audio):
+                audio_buffer.extend(raw_audio)
 
-                if now - last_transcription_time >= buffer_timeout:
-                    if len(audio_buffer) == 0:
-                        if conversation_stage == "WAITING_FOR_CONFIRMATION":
-                            confirmation_attempts += 1
-                            if confirmation_attempts <= 2:
-                                logger.websocket.info(f"No audio received during confirmation stage. Playing 'didn't hear' prompt (attempt {confirmation_attempts}/2).")
-                                logger.log_call_event("NO_AUDIO_CONFIRMATION", call_sid, customer_info['name'], {"attempt": confirmation_attempts})
-                                await play_did_not_hear_response(websocket, call_detected_lang)
-                                last_transcription_time = time.time()
-                            else:
-                                logger.websocket.info("Too many no-audio responses during confirmation. Ending call.")
-                                logger.log_call_event("CALL_END_NO_CONFIRMATION", call_sid, customer_info['name'])
-                                interaction_complete = True
-                                break
-                        elif conversation_stage == "WAITING_FOR_LANG_DETECT":
-                            logger.websocket.info("No audio received during language detection stage. Playing 'didn't hear' prompt.")
-                            logger.log_call_event("NO_AUDIO_LANG_DETECT", call_sid, customer_info['name'])
-                            await play_did_not_hear_response(websocket, call_detected_lang)
-                            # Reset the timer to wait for user response
-                            last_transcription_time = time.time()
-                        elif conversation_stage == "WAITING_AGENT_RESPONSE":
-                            agent_question_repeat_count += 1
-                            if agent_question_repeat_count <= 3:  # Increased to 3 repeats for better user experience
-                                logger.websocket.info(f"💭 CONVERSATION FLOW: No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/3).")
-                                logger.websocket.info(f"⏱️ User had {BUFFER_DURATION_SECONDS} seconds to respond - extending patience...")
-                                logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count, "timeout": BUFFER_DURATION_SECONDS})
-                                await play_agent_connect_question(websocket, call_detected_lang)
-                                # Reset the timer to wait for user response
-                                last_transcription_time = time.time()
-                                logger.websocket.info(f"🎯 Timer reset - now waiting another {BUFFER_DURATION_SECONDS}s for user response...")
-                            else:
-                                # After 3 attempts with no response, play a clarifying message and try once more
-                                logger.websocket.info("No clear response after 3 attempts. Playing clarification message.")
-                                logger.log_call_event("AGENT_QUESTION_CLARIFICATION", call_sid, customer_info['name'])
-                                
-                                # Play clarifying message asking for clear yes/no response
-                                clarification_msg = {
-                                    "en-IN": "Please say 'yes' if you want to speak to an agent, or 'no' if you don't need assistance.",
-                                    "hi-IN": "कृपया 'हां' कहें यदि आप एजेंट से बात करना चाहते हैं, या 'नहीं' कहें यदि आपको सहायता की आवश्यकता नहीं है।",
-                                    "ta-IN": "நீங்கள் ஒரு முகவரிடம் பேச விரும்பினால் 'ஆம்' என்று சொல்லுங்கள், அல்லது உங்களுக்கு உதவி தேவையில்லை என்றால் 'இல்லை' என்று சொல்லுங்கள்।"
-                                }
-                                clarify_text = clarification_msg.get(call_detected_lang, clarification_msg["en-IN"])
-                                audio_bytes = await sarvam_handler.synthesize_tts(clarify_text, call_detected_lang)
-                                await stream_audio_to_websocket(websocket, audio_bytes)
-                                
-                                # Reset counter for final attempt
-                                agent_question_repeat_count = 0
-                                last_transcription_time = time.time()
-                        audio_buffer.clear()
-                        last_transcription_time = now
-                        continue
+            now = time.time()
+            if transcript_logger:
+                transcript_logger.maybe_flush(now)
 
-                    try:
-                        # Ignore too-short buffers that yield empty transcripts
-                        if len(audio_buffer) < MIN_AUDIO_BYTES:
-                            audio_buffer.clear()
-                            last_transcription_time = now
-                            continue
-                        transcript = await sarvam_handler.transcribe_from_payload(audio_buffer)
-                        if isinstance(transcript, tuple):
-                            transcript_text, detected_language = transcript
-                            # Update the detected language if it was determined during transcription
-                            if detected_language and detected_language != "en-IN":
-                                call_detected_lang = detected_language
-                                logger.websocket.info(f"🌐 Language updated from transcription: {call_detected_lang}")
-                            transcript = transcript_text
-                        elif isinstance(transcript, str):
-                            # Fallback for older handler compatibility
-                            pass
-                        else:
-                            transcript = ""
-                        logger.websocket.info(f"📝 Transcript: {transcript}")
-                        logger.log_call_event("TRANSCRIPT_RECEIVED", call_sid, customer_info['name'], {"transcript": transcript, "stage": conversation_stage})
+            if conversation_stage == "WAITING_CONFIRMATION":
+                timeout = CONFIRMATION_SILENCE_SECONDS
+            elif conversation_stage == "CLAUDE_CHAT":
+                timeout = CLAUDE_SILENCE_SECONDS
+            else:
+                timeout = BUFFER_DURATION_SECONDS
 
-                        if transcript:
-                            if conversation_stage == "WAITING_FOR_CONFIRMATION":
-                                # FIXED: User responded to initial greeting - process confirmation and detect language
-                                user_detected_lang = detect_language(transcript)
-                                logger.websocket.info(f"🎯 User Confirmation Response:")
-                                logger.websocket.info(f"   📍 State-mapped language: {initial_greeting_language}")  
-                                logger.websocket.info(f"   🗣️  User response language: {user_detected_lang}")
-                                logger.websocket.info(f"   💬 User said: '{transcript}'")
-                                logger.log_call_event("USER_CONFIRMATION_RECEIVED", call_sid, customer_info['name'], {
-                                    "transcript": transcript,
-                                    "detected_lang": user_detected_lang,
-                                    "initial_lang": initial_greeting_language
-                                })
-                                
-                                # Set final language and proceed to EMI details
-                                call_detected_lang = user_detected_lang
-                                logger.websocket.info(f"🎉 Final Conversation Language: {call_detected_lang}")
-                                logger.log_call_event("FINAL_LANGUAGE_SET", call_sid, customer_info['name'], {"final_lang": call_detected_lang})
-                                
-                                # Now play EMI details since user has confirmed
-                                try:
-                                    logger.websocket.info(f"🎪 User confirmed - playing EMI details in {call_detected_lang}")
-                                    await play_emi_details_part1(websocket, customer_info, call_detected_lang)
-                                    await play_emi_details_part2(websocket, customer_info, call_detected_lang)
-                                    await play_agent_connect_question(websocket, call_detected_lang)
-                                    conversation_stage = "WAITING_AGENT_RESPONSE"
-                                    logger.websocket.info(f"✅ EMI details and agent question sent successfully")
-                                    logger.websocket.info(f"🎯 CONVERSATION STAGE SET TO: WAITING_AGENT_RESPONSE - Now waiting for user response to agent connect question")
-                                    logger.log_call_event("EMI_DETAILS_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
-                                    
-                                    # CONVERSATION FLOW FIX: Reset timers and buffers for proper user response detection
-                                    audio_buffer.clear()
-                                    last_transcription_time = time.time()
-                                    agent_question_repeat_count = 0  # Reset repeat counter for fresh start
-                                    
-                                    # Give extra time for user to formulate response after all the information
-                                    logger.websocket.info("⏳ Extended wait period - user processing EMI info and agent question...")
-                                    await asyncio.sleep(1.0)  # Additional processing time after information delivery
-                                except Exception as e:
-                                    logger.websocket.error(f"❌ Error playing EMI details: {e}")
-                                    logger.log_call_event("EMI_DETAILS_ERROR", call_sid, customer_info['name'], {"error": str(e)})
-                            
-                            elif conversation_stage == "WAITING_FOR_LANG_DETECT":
-                                # Detect user's preferred language from their response
-                                user_detected_lang = detect_language(transcript)
-                                logger.websocket.info(f"🎯 User Response Language Detection:")
-                                logger.websocket.info(f"   📍 State-mapped language: {initial_greeting_language}")
-                                logger.websocket.info(f"   🗣️  User detected language: {user_detected_lang}")
-                                logger.websocket.info(f"   📄 CSV language: {csv_language}")
-                                logger.log_call_event("LANGUAGE_DETECTED", call_sid, customer_info['name'], {
-                                    "detected_lang": user_detected_lang, 
-                                    "state_lang": initial_greeting_language,
-                                    "csv_lang": csv_language,
-                                    "transcript": transcript
-                                })
-                                
-                                # Enhanced Language Switching Logic
-                                if user_detected_lang != initial_greeting_language:
-                                    logger.websocket.info(f"🔄 Language Mismatch Detected!")
-                                    logger.websocket.info(f"   Initial greeting was in: {initial_greeting_language}")
-                                    logger.websocket.info(f"   User responded in: {user_detected_lang}")
-                                    logger.websocket.info(f"   🔄 Switching entire conversation to: {user_detected_lang}")
-                                    logger.log_call_event("LANGUAGE_SWITCH_DETECTED", call_sid, customer_info['name'], {
-                                        "from_lang": initial_greeting_language,
-                                        "to_lang": user_detected_lang,
-                                        "reason": "user_preference"
-                                    })
-                                    
-                                    # Replay greeting in user's preferred language
-                                    try:
-                                        logger.websocket.info(f"🔁 Replaying greeting in user's language: {user_detected_lang}")
-                                        await greeting_template_play(websocket, customer_info, lang=user_detected_lang)
-                                        logger.websocket.info(f"✅ Successfully replayed greeting in {user_detected_lang}")
-                                        logger.log_call_event("GREETING_REPLAYED_NEW_LANG", call_sid, customer_info['name'], {"new_lang": user_detected_lang})
-                                        
-                                        # Update the conversation language to user's preference
-                                        call_detected_lang = user_detected_lang
-                                        
-                                        # Give user a moment to acknowledge the language switch
-                                        await asyncio.sleep(1)
-                                        
-                                    except Exception as e:
-                                        logger.websocket.error(f"❌ Error replaying greeting in {user_detected_lang}: {e}")
-                                        logger.log_call_event("GREETING_REPLAY_ERROR", call_sid, customer_info['name'], {"error": str(e)})
-                                        # Fallback to user's detected language anyway
-                                        call_detected_lang = user_detected_lang
-                                        
-                                else:
-                                    logger.websocket.info(f"✅ Language Consistency Confirmed!")
-                                    logger.websocket.info(f"   User responded in same language as greeting: {user_detected_lang}")
-                                    logger.log_call_event("LANGUAGE_CONSISTENT", call_sid, customer_info['name'], {"language": user_detected_lang})
-                                    call_detected_lang = user_detected_lang
-                                
-                                # Final language confirmation
-                                logger.websocket.info(f"🎉 Final Conversation Language: {call_detected_lang}")
-                                logger.log_call_event("FINAL_LANGUAGE_SET", call_sid, customer_info['name'], {"final_lang": call_detected_lang})
-                                
-                                # Play EMI details in final determined language
-                                try:
-                                    await play_emi_details_part1(websocket, customer_info or {}, call_detected_lang)
-                                    await play_emi_details_part2(websocket, customer_info or {}, call_detected_lang)
-                                    await play_agent_connect_question(websocket, call_detected_lang)
-                                    conversation_stage = "WAITING_AGENT_RESPONSE"
-                                    logger.tts.info(f"✅ EMI details and agent question sent successfully in {call_detected_lang}")
-                                    logger.websocket.info(f"🎯 CONVERSATION STAGE SET TO: WAITING_AGENT_RESPONSE - Now waiting for user response to agent connect question")
-                                    logger.log_call_event("EMI_DETAILS_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
-                                    
-                                    # CONVERSATION FLOW FIX: Reset timers and buffers for proper user response detection  
-                                    audio_buffer.clear()
-                                    last_transcription_time = time.time()
-                                    agent_question_repeat_count = 0  # Reset repeat counter for fresh start
-                                    
-                                    # Give extra time for user to formulate response after language switch
-                                    logger.websocket.info("⏳ Language detection flow - additional wait after EMI info and agent question...")
-                                    await asyncio.sleep(1.0)  # Additional processing time for language detection flow
-                                except Exception as e:
-                                    logger.tts.error(f"❌ Error playing EMI details: {e}")
-                                    logger.log_call_event("EMI_DETAILS_ERROR", call_sid, customer_info['name'], {"error": str(e)})
-                            
-                            elif conversation_stage == "WAITING_AGENT_RESPONSE":
-                                # ⚠️ CRITICAL: Validate transcript before intent detection to prevent false agent transfers
-                                transcript_clean = transcript.strip()
-                                
-                                # Skip intent detection for empty, too short, or invalid transcripts
-                                if not transcript_clean or len(transcript_clean) < 2:
-                                    logger.websocket.info(f"🚫 Skipping intent detection - transcript too short: '{transcript_clean}'")
-                                    logger.log_call_event("TRANSCRIPT_TOO_SHORT", call_sid, customer_info['name'], {"transcript": transcript_clean, "length": len(transcript_clean)})
-                                    audio_buffer.clear()
-                                    last_transcription_time = now
-                                    continue
-                                
-                                # Additional validation: Check for meaningful content (at least one alphabetic character)
-                                if not any(c.isalpha() for c in transcript_clean):
-                                    logger.websocket.info(f"🚫 Skipping intent detection - no alphabetic content: '{transcript_clean}'")
-                                    logger.log_call_event("TRANSCRIPT_NO_LETTERS", call_sid, customer_info['name'], {"transcript": transcript_clean})
-                                    audio_buffer.clear()
-                                    last_transcription_time = now
-                                    continue
-                                
-                                logger.websocket.info(f"🎯 Processing valid transcript for intent: '{transcript_clean}'")
-                                
-                                # Use Claude for intent detection
-                                try:
-                                    intent = detect_intent_with_claude(transcript_clean, call_detected_lang)
-                                    logger.websocket.info(f"Claude detected intent: {intent}")
-                                    logger.log_call_event("INTENT_DETECTED_CLAUDE", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript_clean})
-                                except Exception as e:
-                                    logger.websocket.error(f"❌ Error in Claude intent detection: {e}")
-                                    # Fallback to keyword-based detection
-                                    intent = detect_intent_fur(transcript_clean, call_detected_lang)
-                                    logger.websocket.info(f"Fallback intent detection: {intent}")
-                                    logger.log_call_event("INTENT_DETECTED_FALLBACK", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript_clean})
+            if now - last_transcription_time < timeout:
+                continue
 
-                                # 🛡️ STRICT INTENT HANDLING - Only process clear, confident intents
-                                if intent == "affirmative" or intent == "agent_transfer":
-                                    if conversation_stage != "TRANSFERRING_TO_AGENT":  # Prevent multiple transfers
-                                        logger.websocket.info(f"✅ CONFIRMED: User affirmed agent transfer. Intent: {intent}, Transcript: '{transcript_clean}'")
-                                        logger.log_call_event("AGENT_TRANSFER_INITIATED", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript_clean})
-                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                        conversation_stage = "TRANSFERRING_TO_AGENT"
-                                        interaction_complete = True
-                                        # Wait for a moment before closing to ensure transfer message is sent
-                                        await asyncio.sleep(2)
-                                        break
-                                    else:
-                                        logger.websocket.warning("⚠️ Agent transfer already in progress, ignoring duplicate request")
-                                elif intent == "negative":
-                                    if conversation_stage != "GOODBYE_DECLINE":  # Prevent multiple goodbyes
-                                        logger.websocket.info(f"✅ CONFIRMED: User declined agent transfer. Intent: {intent}, Transcript: '{transcript_clean}'")
-                                        logger.log_call_event("AGENT_TRANSFER_DECLINED", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript_clean})
-                                        await play_goodbye_after_decline(websocket, call_detected_lang)
-                                        conversation_stage = "GOODBYE_DECLINE"
-                                        interaction_complete = True
-                                        # Wait for goodbye message to be sent before closing
-                                        await asyncio.sleep(3)
-                                        break
-                                    else:
-                                        logger.websocket.warning("⚠️ Goodbye already sent, ignoring duplicate request")
-                                elif intent == "confused":
-                                    # User seems confused, repeat the question
-                                    logger.websocket.info(f"🔄 User seems confused. Repeating agent question. Transcript: '{transcript_clean}'")
-                                    logger.log_call_event("AGENT_QUESTION_CONFUSED_REPEAT", call_sid, customer_info['name'], {"transcript": transcript_clean})
-                                    await play_agent_connect_question(websocket, call_detected_lang)
-                                    last_transcription_time = time.time()
-                                elif intent == "unclear" or intent == "unknown":
-                                    # Handle unclear responses more carefully
-                                    agent_question_repeat_count += 1
-                                    logger.websocket.info(f"⚠️ Unclear response '{transcript_clean}' (intent: {intent}). Attempt {agent_question_repeat_count}/2")
-                                    
-                                    if agent_question_repeat_count <= 2:  # Limit to 2 repeats
-                                        logger.websocket.info(f"🔄 Repeating agent question due to unclear response (attempt {agent_question_repeat_count}/2).")
-                                        logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count, "transcript": transcript_clean, "intent": intent})
-                                        await play_agent_connect_question(websocket, call_detected_lang)
-                                        # Reset the timer to wait for user response
-                                        last_transcription_time = time.time()
-                                    else:
-                                        logger.websocket.info("Too many unclear responses. Assuming user wants agent transfer.")
-                                        logger.log_call_event("AUTO_AGENT_TRANSFER_UNCLEAR", call_sid, customer_info['name'])
-                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                        conversation_stage = "TRANSFERRING_TO_AGENT"
-                                        interaction_complete = True
-                                        # Wait for transfer message to be sent before closing
-                                        await asyncio.sleep(2)
-                                        break
-                            # Add more elif conditions here for additional conversation stages if your flow extends
-                    except Exception as e:
-                        logger.websocket.error(f"❌ Error processing transcript: {e}")
-                        logger.log_call_event("TRANSCRIPT_PROCESSING_ERROR", call_sid, customer_info['name'] if customer_info else 'Unknown', {"error": str(e)})
+            if len(audio_buffer) < MIN_AUDIO_BYTES:
+                audio_buffer.clear()
+                last_transcription_time = now
+                continue
 
-                    audio_buffer.clear()
-                    last_transcription_time = now
+            try:
+                transcript = await sarvam_handler.transcribe_from_payload(audio_buffer)
+                if isinstance(transcript, tuple):
+                    transcript = transcript[0]
+                elif not isinstance(transcript, str):
+                    transcript = ""
+            except Exception as err:
+                logger.websocket.error(f"❌ Error transcribing audio: {err}")
+                audio_buffer.clear()
+                last_transcription_time = now
+                continue
 
-    except Exception as e:
-        logger.error(f"WebSocket compatibility error: {e}")
-        logger.log_call_event("WEBSOCKET_COMPATIBILITY_ERROR", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown', {"error": str(e)})
+            audio_buffer.clear()
+            last_transcription_time = time.time()
+
+            transcript = (transcript or "").strip()
+            if transcript_logger and transcript:
+                transcript_logger.add_transcript(transcript, last_transcription_time)
+
+            if not transcript:
+                continue
+
+            logger.websocket.info(f"📝 Transcript ({conversation_stage}): {transcript}")
+            detected_lang = detect_language(transcript)
+            if detected_lang and detected_lang != current_language:
+                logger.websocket.info(
+                    f"🌐 Switching customer language {current_language} → {detected_lang}"
+                )
+                current_language = detected_lang
+
+            if conversation_stage == "WAITING_CONFIRMATION":
+                result = await handle_confirmation_response(transcript)
+                if result == "negative":
+                    interaction_complete = True
+                    await asyncio.sleep(2)
+                    break
+            elif conversation_stage == "CLAUDE_CHAT":
+                outcome = await handle_claude_exchange(transcript)
+                if outcome == "end":
+                    await asyncio.sleep(2)
+                    break
+
+    except Exception as err:
+        logger.error.error(f"WebSocket error: {err}")
+        logger.log_call_event("WEBSOCKET_ERROR", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown', {"error": str(err)})
     finally:
-        # Ensure the websocket is closed gracefully only after conversation is complete
+        claude_chat_manager.end_session(call_sid)
+        if transcript_logger:
+            transcript_logger.flush(force=True)
         try:
             if not interaction_complete:
-                # If we're exiting due to an error before conversation completion, wait a bit
                 await asyncio.sleep(1)
-            
             if websocket.client_state.name not in ['DISCONNECTED']:
                 await websocket.close()
                 logger.websocket.info("🔒 WebSocket connection closed gracefully")
-            else:
-                logger.websocket.info("🔒 WebSocket already disconnected")
-        except Exception as close_error:
-            logger.error(f"Error closing WebSocket: {close_error}")
-        logger.log_call_event("WEBSOCKET_CLOSED_GRACEFUL", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown')
+        except Exception as close_err:
+            logger.error.error(f"Error closing WebSocket: {close_err}")
 
+        logger.log_call_event(
+            "WEBSOCKET_CLOSED_GRACEFUL",
+            call_sid or 'unknown',
+            customer_info['name'] if customer_info else 'Unknown'
+        )
+
+        # Update final status
+        try:
+            session = db_manager.get_session()
+            completed_session = update_call_status(
+                session=session,
+                call_sid=call_sid,
+                status=CallStatus.COMPLETED,
+                message="Conversation ended"
+            )
+            session.commit()
+            customer_id_event = (
+                str(completed_session.customer_id)
+                if completed_session and completed_session.customer_id
+                else None
+            )
+            await push_status_update(
+                call_sid,
+                CallStatus.COMPLETED,
+                "Conversation ended",
+                customer_id=customer_id_event,
+            )
+        except Exception as db_error:
+            logger.database.error(f"❌ Error updating final call status for CallSid={call_sid}: {db_error}")
+        finally:
+            session.close()
 
 # --- WebSocket Endpoint for Voicebot ---
 @app.websocket("/ws/voicebot/{session_id}")
@@ -1587,7 +2710,6 @@ async def upload_customers(file: UploadFile = File(...)):  # REMOVED AUTH FOR TE
 async def trigger_single_call(customer_id: str = Body(..., embed=True)):  # REMOVED AUTH FOR TESTING: current_user: dict = Depends(get_current_user)
     """
     Triggers a single call to a customer by their ID.
-    Requires authentication.
     """
     print(f"🚀 [CHECKPOINT] /api/trigger-single-call endpoint hit by user: testing-mode")
     print(f"🚀 [CHECKPOINT] Customer ID: {customer_id}")
@@ -1595,14 +2717,25 @@ async def trigger_single_call(customer_id: str = Body(..., embed=True)):  # REMO
     try:
         result = await call_service.trigger_single_call(customer_id)
         print(f"🚀 [CHECKPOINT] Call service result: {result}")
-        
+
+        if result.get("success") and result.get("call_sid"):
+            status_value = result.get("status") or CallStatus.RINGING
+            customer_id = result.get("customer", {}).get("id")
+            await push_status_update(
+                result["call_sid"],
+                status_value,
+                "Call initiated successfully",
+                customer_id=customer_id,
+            )
+            
         # Log the action with user information
         logger.info(f"User testing-mode triggered single call for customer: {customer_id}")
         
         return result
     except Exception as e:
-        print(f"❌ [CHECKPOINT] Exception in trigger_single_call endpoint: {e}")
-        logger.error(f"Trigger single call error for user testing-mode: {str(e)}")
+        error_msg = f"Trigger single call error for user testing-mode: {str(e)}"
+        print(f"❌ [CHECKPOINT] {error_msg}")
+        logger.error(error_msg, exc_info=True)
         return {"success": False, "error": str(e)}
 
 @app.post("/api/trigger-bulk-calls")
@@ -1811,6 +2944,72 @@ async def get_uploaded_file_ids():  # REMOVED AUTH FOR TESTING: current_user: di
         return []
     finally:
         session.close()
+@app.get("/api/uploaded-files/{upload_id}/details")
+async def get_upload_details(upload_id: str):
+    """Return detailed information about a specific upload batch."""
+    print(f"📄 [CHECKPOINT] /api/uploaded-files/{upload_id}/details hit")
+
+    session = db_manager.get_session()
+    try:
+        upload = (
+            session.query(FileUpload)
+            .filter(FileUpload.id == upload_id)
+            .first()
+        )
+
+        if not upload:
+            return {"success": False, "error": "Upload not found"}
+
+        rows = (
+            session.query(UploadRow)
+            .filter(UploadRow.file_upload_id == upload_id)
+            .order_by(UploadRow.line_number.asc())
+            .all()
+        )
+
+        row_payload = []
+        for row in rows:
+            row_payload.append(
+                {
+                    "id": str(row.id),
+                    "line_number": row.line_number,
+                    "raw_data": row.raw_data,
+                    "status": row.status,
+                    "error": row.error,
+                    "match_method": row.match_method,
+                    "match_customer_id": str(row.match_customer_id)
+                    if row.match_customer_id
+                    else None,
+                    "match_loan_id": str(row.match_loan_id) if row.match_loan_id else None,
+                    "created_at": format_ist_datetime(row.matched_at),
+                }
+            )
+
+        return {
+            "success": True,
+            "upload_details": {
+                "id": str(upload.id),
+                "filename": upload.filename,
+                "original_filename": upload.original_filename,
+                "uploaded_by": upload.uploaded_by,
+                "uploaded_at": format_ist_datetime(upload.uploaded_at),
+                "total_records": upload.total_records,
+                "processed_records": upload.processed_records,
+                "success_records": upload.success_records,
+                "failed_records": upload.failed_records,
+                "status": upload.status,
+                "processing_errors": upload.processing_errors,
+                "rows": row_payload,
+            },
+        }
+    except Exception as exc:
+        print(f"❌ [CHECKPOINT] Exception in get_upload_details: {exc}")
+        return {"success": False, "error": str(exc)}
+    finally:
+        session.close()
+
+
+
 
 @app.get("/api/uploaded-files/{batch_id}/details")
 async def get_batch_details(batch_id: str):  # REMOVED AUTH FOR TESTING: current_user: dict = Depends(get_current_user_optional)
@@ -1920,542 +3119,21 @@ async def exotel_webhook(request: Request):
         print(f"❌ [WEBHOOK] Error processing webhook: {e}")
         return {"status": "error", "message": str(e)}
 
-# This is a catch-all for the old websocket endpoint, redirecting or handling as needed.
 @app.websocket("/stream")
 async def old_websocket_endpoint(websocket: WebSocket):
-    """
-    Handles the old /stream endpoint.
-    For backward compatibility, we'll redirect this to the new voicebot endpoint.
-    """
     await websocket.accept()
-    print("[Compatibility] Old /stream endpoint connected. Using voicebot logic...")
-    
-    # Initialize variables - we'll get the real CallSid from the start message
     query_params = dict(websocket.query_params)
-    temp_call_id = query_params.get('temp_call_id')
-    call_sid = query_params.get('call_sid')
-    phone = query_params.get('phone')
-    
-    print(f"[Compatibility] Initial query params: temp_call_id={temp_call_id}, call_sid={call_sid}, phone={phone}")
-    
-    # State variable for the conversation stage
-    conversation_stage = "WAITING_FOR_START" # Wait for the start message to get CallSid
-    call_detected_lang = "en-IN" # Default language, will be updated after first user response
-    audio_buffer = bytearray()
-    last_transcription_time = time.time()
-    interaction_complete = False # Flag to stop processing media after the main flow ends
-    customer_info = None # Will be set when we get customer data
-    initial_greeting_played = False # Track if initial greeting was played
-    agent_question_repeat_count = 0 # Track how many times agent question was repeated
-    emi_delivery_in_progress = False # Flag to prevent premature WebSocket closure during EMI delivery
-    session_id = None # Will be set from the start message
-    
-    # Call timeout mechanism
-    call_start_time = time.time()
-    max_call_duration = 600  # 10 minutes maximum call duration
-    
-    try:
-        while True:
-            # Check for call timeout
-            if time.time() - call_start_time > max_call_duration:
-                logger.websocket.warning(f"⏰ Call timeout reached ({max_call_duration}s) - ending call gracefully")
-                logger.log_call_event("CALL_TIMEOUT", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown')
-                if customer_info and not interaction_complete:
-                    # Play a quick timeout message
-                    try:
-                        timeout_msg = GOODBYE_TEMPLATE.get(call_detected_lang, GOODBYE_TEMPLATE["en-IN"])
-                        audio_bytes = await sarvam_handler.synthesize_tts(timeout_msg, call_detected_lang)
-                        await stream_audio_to_websocket(websocket, audio_bytes)
-                        await asyncio.sleep(2)  # Wait for message to play
-                    except Exception as e:
-                        logger.tts.error(f"❌ Error playing timeout message: {e}")
-                interaction_complete = True
-                break
-            data = await websocket.receive_text()
-            msg = json.loads(data)
-            event_type = msg.get('event', 'unknown')
-            
-            # Log WebSocket message using the new logging system
-            logger.websocket.info(f"📨 Received message: {event_type}")
-            logger.log_websocket_message(event_type, msg, call_sid=call_sid, session_id=session_id)
-            
-            # Debug: Log complete message for troubleshooting
-            logger.websocket.debug(f"🔍 FULL MESSAGE DEBUG: {json.dumps(msg, indent=2)}")
-
-            if msg.get("event") == "start":
-                logger.websocket.info("🔁 Got start event - extracting CallSid and customer data")
-                logger.log_call_event("START_MESSAGE_RECEIVED", call_sid or "unknown")
-                
-                # Debug: Log the full start message to see what Exotel is actually sending
-                logger.websocket.debug(f"🔍 FULL START MESSAGE DEBUG: {json.dumps(msg, indent=2)}")
-                
-                # Extract CallSid from the start message - this is how Exotel sends it
-                call_sid = None
-                # CRITICAL: Check the nested start structure first - this is where Exotel actually sends it
-                if 'start' in msg and 'call_sid' in msg['start']:
-                    call_sid = msg['start']['call_sid']  # CRITICAL: This is where Exotel sends it!
-                    logger.websocket.info(f"🎯 FOUND CallSid in start.call_sid: {call_sid}")
-                elif 'start' in msg and 'callSid' in msg['start']:
-                    call_sid = msg['start']['callSid']
-                    logger.websocket.info(f"🎯 FOUND CallSid in start.callSid: {call_sid}")
-                elif 'callSid' in msg:
-                    call_sid = msg['callSid']
-                elif 'CallSid' in msg:
-                    call_sid = msg['CallSid']
-                elif 'call_sid' in msg:
-                    call_sid = msg['call_sid']
-                elif 'streamSid' in msg:
-                    call_sid = msg['streamSid']
-                elif 'stream' in msg and 'callSid' in msg['stream']:
-                    call_sid = msg['stream']['callSid']
-                
-                # Debug: Check all possible locations for CallSid
-                logger.websocket.debug("🔍 Checking for CallSid in message fields:")
-                logger.websocket.debug(f"🔍 msg.get('callSid'): {msg.get('callSid')}")
-                logger.websocket.debug(f"🔍 msg.get('CallSid'): {msg.get('CallSid')}")
-                logger.websocket.debug(f"🔍 msg.get('call_sid'): {msg.get('call_sid')}")
-                logger.websocket.debug(f"🔍 msg.get('streamSid'): {msg.get('streamSid')}")
-                logger.websocket.debug(f"🔍 msg.get('stream'): {msg.get('stream')}")
-                logger.websocket.debug(f"🔍 msg.get('start'): {msg.get('start')}")
-                logger.websocket.debug(f"🔍 All msg keys: {list(msg.keys())}")
-                
-                logger.websocket.info(f"✅ Extracted CallSid from start message: {call_sid}")
-                
-                # Use CallSid as session_id
-                session_id = call_sid or generate_websocket_session_id()
-                
-                logger.websocket.info(f"Using session_id: {session_id}")
-                
-                # Now that we have the CallSid, try to get customer info from multiple sources
-                if not customer_info:
-                    # 1. Try to get from Redis using CallSid
-                    if call_sid:
-                        logger.database.info(f"Looking up customer data by CallSid: {call_sid}")
-                        redis_data = redis_manager.get_call_session(call_sid)
-                        if redis_data:
-                            customer_info = {
-                                'name': redis_data.get('name'),
-                                'loan_id': redis_data.get('loan_id'),
-                                'amount': redis_data.get('amount'),
-                                'due_date': redis_data.get('due_date'),
-                                'lang': redis_data.get('language_code', 'en-IN'),
-                                'phone': redis_data.get('phone_number', ''),
-                                'state': redis_data.get('state', '')
-                            }
-                            logger.database.info(f"✅ Found customer data in Redis: {customer_info['name']}")
-                            logger.log_call_event("CUSTOMER_DATA_FOUND_REDIS", call_sid, customer_info['name'], customer_info)
-                    
-                    # 2. Try to get customer data from database by CallSid
-                    if not customer_info and call_sid:
-                        logger.database.info(f"Looking up call session in database by CallSid: {call_sid}")
-                        try:
-                            session_db = db_manager.get_session()
-                            call_session = get_call_session_by_sid(session_db, call_sid)
-                            if call_session and call_session.customer_id:
-                                # Get customer from database
-                                customer = session_db.query(Customer).filter(Customer.id == call_session.customer_id).first()
-                                if customer:
-                                    customer_info = {
-                                        'name': customer.name,
-                                        'loan_id': customer.loan_id,
-                                        'amount': customer.amount,
-                                        'due_date': customer.due_date,
-                                        'lang': customer.language_code or 'en-IN',
-                                        'phone': customer.phone_number,
-                                        'state': customer.state or ''
-                                    }
-                                    logger.database.info(f"✅ Found customer in database: {customer_info['name']}")
-                                    logger.log_call_event("CUSTOMER_DATA_FOUND_DATABASE", call_sid, customer_info['name'], customer_info)
-                            session_db.close()
-                        except Exception as e:
-                            logger.database.error(f"❌ Error looking up customer in database: {e}")
-                
-                # 3. If no customer found initially, wait for data (race condition fix)
-                if not customer_info:
-                    logger.websocket.info("⏳ Customer data not found immediately - waiting for passthru handler...")
-                    
-                    # Wait up to 10 seconds for customer data to arrive via passthru handler
-                    max_wait_time = 10
-                    wait_interval = 0.5
-                    waited_time = 0
-                    
-                    while waited_time < max_wait_time and not customer_info:
-                        await asyncio.sleep(wait_interval)
-                        waited_time += wait_interval
-                        
-                        # Try Redis again
-                        if call_sid:
-                            redis_data = redis_manager.get_call_session(call_sid)
-                            if redis_data:
-                                customer_info = {
-                                    'name': redis_data.get('name'),
-                                    'loan_id': redis_data.get('loan_id'),
-                                    'amount': redis_data.get('amount'),
-                                    'due_date': redis_data.get('due_date'),
-                                    'lang': redis_data.get('language_code', 'en-IN'),
-                                    'phone': redis_data.get('phone_number', ''),
-                                    'state': redis_data.get('state', '')
-                                }
-                                logger.database.info(f"✅ Found customer data after waiting {waited_time}s: {customer_info['name']}")
-                                logger.log_call_event("CUSTOMER_DATA_FOUND_AFTER_WAIT", call_sid, customer_info['name'], customer_info)
-                                break
-                        
-                        # Try database again
-                        if not customer_info and call_sid:
-                            try:
-                                session_db = db_manager.get_session()
-                                call_session = get_call_session_by_sid(session_db, call_sid)
-                                if call_session and call_session.customer_id:
-                                    customer = session_db.query(Customer).filter(Customer.id == call_session.customer_id).first()
-                                    if customer:
-                                        customer_info = {
-                                            'name': customer.name,
-                                            'loan_id': customer.loan_id,
-                                            'amount': customer.amount,
-                                            'due_date': customer.due_date,
-                                            'lang': customer.language_code or 'en-IN',
-                                            'phone': customer.phone_number,
-                                            'state': customer.state or ''
-                                        }
-                                        logger.database.info(f"✅ Found customer in database after waiting {waited_time}s: {customer_info['name']}")
-                                        logger.log_call_event("CUSTOMER_DATA_FOUND_DATABASE_AFTER_WAIT", call_sid, customer_info['name'], customer_info)
-                                        break
-                                session_db.close()
-                            except Exception as e:
-                                logger.database.error(f"❌ Error looking up customer in database during wait: {e}")
-                    
-                    if customer_info:
-                        logger.websocket.info(f"🎉 Successfully found customer data after waiting {waited_time}s")
-                    else:
-                        logger.websocket.warning(f"⚠️ Still no customer data found after waiting {max_wait_time}s")
-                
-                # 4. Final check - if still no customer found, this is an error
-                if not customer_info:
-                    logger.database.error("❌ No customer data found after waiting - cannot proceed without real customer information")
-                    logger.log_call_event("CUSTOMER_DATA_NOT_FOUND", call_sid)
-                    await websocket.send_text(json.dumps({
-                        "event": "error",
-                        "message": "Customer data not found. Please ensure customer information is uploaded and call is triggered properly."
-                    }))
-                    return
-                
-                # 4. Validate customer data has required fields (allow placeholder values)
-                required_fields = ['name', 'loan_id', 'amount', 'due_date']
-                missing_fields = [field for field in required_fields if not customer_info.get(field) or customer_info.get(field) in ['None', 'null', 'undefined']]
-                if missing_fields:
-                    logger.database.error(f"❌ Customer data missing required fields: {missing_fields}")
-                    logger.log_call_event("CUSTOMER_DATA_INCOMPLETE", call_sid, customer_info['name'] if customer_info else 'Unknown', {"missing_fields": missing_fields})
-                    await websocket.send_text(json.dumps({
-                        "event": "error",
-                        "message": f"Customer data incomplete. Missing fields: {', '.join(missing_fields)}"
-                    }))
-                    return
-
-                # Convert placeholder values to generic terms for speech
-                if customer_info.get('loan_id') in ['Unknown', 'N/A', None, 'None', 'null']:
-                    customer_info['loan_id'] = '1234'  # Generic loan ID for speech
-                if customer_info.get('amount') in ['Unknown', 'N/A', '₹0', None, 'None', 'null']:
-                    customer_info['amount'] = '5000'  # Generic amount for speech
-                if customer_info.get('due_date') in ['Unknown', 'N/A', None, 'None', 'null']:
-                    customer_info['due_date'] = 'this month'  # Generic due date for speech                print(f"[Compatibility] ✅ Customer data validated: {customer_info['name']} - Loan: {customer_info['loan_id']}, Amount: ₹{customer_info['amount']}")
-                
-                # Initialize language variables for enhanced language detection
-                csv_language = customer_info.get('lang', 'en-IN')
-                state_language = get_initial_language_from_state(customer_info.get('state', ''))
-                initial_greeting_language = csv_language if csv_language and csv_language != 'en-IN' else state_language
-                call_detected_lang = initial_greeting_language
-                
-                logger.websocket.info(f"🌐 Language Configuration:")
-                logger.websocket.info(f"   📄 CSV Language: {csv_language}")
-                logger.websocket.info(f"   📍 State Language: {state_language}")
-                logger.websocket.info(f"   🎯 Initial Greeting Language: {initial_greeting_language}")
-                
-                # Play initial greeting immediately when WebSocket starts
-                logger.tts.info(f"1. Playing initial greeting for {customer_info['name']} in {initial_greeting_language}")
-                logger.log_call_event("INITIAL_GREETING_START", call_sid, customer_info['name'], {"language": initial_greeting_language})
-                try:
-                    await greeting_template_play(websocket, customer_info, lang=initial_greeting_language)
-                    logger.tts.info(f"✅ Initial greeting played successfully in {initial_greeting_language}")
-                    logger.log_call_event("INITIAL_GREETING_SUCCESS", call_sid, customer_info['name'], {"language": initial_greeting_language})
-                    initial_greeting_played = True
-                    conversation_stage = "WAITING_FOR_LANG_DETECT"
-                except Exception as e:
-                    logger.tts.error(f"❌ Error playing initial greeting: {e}")
-                    logger.log_call_event("INITIAL_GREETING_ERROR", call_sid, customer_info['name'], {"error": str(e)})
-                    # Try fallback simple greeting
-                    try:
-                        simple_greeting = f"Hello, this is South India Finvest Bank calling. Am I speaking with {customer_info['name']}?"
-                        audio_bytes = await sarvam_handler.synthesize_tts(simple_greeting, "en-IN")
-                        await stream_audio_to_websocket(websocket, audio_bytes)
-                        logger.tts.info("✅ Fallback greeting sent successfully")
-                        logger.log_call_event("FALLBACK_GREETING_SUCCESS", call_sid, customer_info['name'])
-                        initial_greeting_played = True
-                        conversation_stage = "WAITING_FOR_LANG_DETECT"
-                    except Exception as fallback_e:
-                        logger.tts.error(f"❌ Error sending fallback greeting: {fallback_e}")
-                        logger.log_call_event("FALLBACK_GREETING_ERROR", call_sid, customer_info['name'], {"error": str(fallback_e)})
-                continue
-
-            if msg.get("event") == "stop":
-                logger.websocket.info("🛑 Received stop event from Twilio/Exotel")
-                # Don't break the loop immediately - only if conversation is complete
-                if interaction_complete:
-                    logger.websocket.info("✅ Conversation already complete, processing stop event")
-                    break
-                else:
-                    logger.websocket.info("⚠️ Stop event received but conversation not complete - ignoring for now")
-                    # Log the stop event but continue processing
-                    logger.log_call_event("STOP_EVENT_IGNORED", call_sid, customer_info['name'] if customer_info else 'Unknown', 
-                                        {"reason": "conversation_not_complete", "stage": conversation_stage})
-                    continue
-
-            if msg.get("event") == "media":
-                payload_b64 = msg["media"]["payload"]
-                raw_audio = base64.b64decode(payload_b64)
-
-                if interaction_complete:
-                    continue
-
-                if raw_audio and any(b != 0 for b in raw_audio):
-                    audio_buffer.extend(raw_audio)
-                
-                now = time.time()
-
-                if now - last_transcription_time >= BUFFER_DURATION_SECONDS:
-                    if len(audio_buffer) == 0:
-                        if conversation_stage == "WAITING_FOR_LANG_DETECT":
-                            logger.websocket.info("No audio received during language detection stage. Playing 'didn't hear' prompt.")
-                            logger.log_call_event("NO_AUDIO_LANG_DETECT", call_sid, customer_info['name'])
-                            await play_did_not_hear_response(websocket, call_detected_lang)
-                            last_transcription_time = time.time()
-                        elif conversation_stage == "WAITING_AGENT_RESPONSE":
-                            agent_question_repeat_count += 1
-                            if agent_question_repeat_count <= 3:  # Increased to 3 repeats for better user experience
-                                logger.websocket.info(f"No audio received during agent question stage. Repeating question (attempt {agent_question_repeat_count}/3).")
-                                logger.log_call_event("AGENT_QUESTION_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count})
-                                await play_agent_connect_question(websocket, call_detected_lang)
-                                last_transcription_time = time.time()
-                            else:
-                                # After 3 attempts with no response, play a clarifying message and try once more
-                                logger.websocket.info("No clear response after 3 attempts. Playing clarification message.")
-                                logger.log_call_event("AGENT_QUESTION_CLARIFICATION", call_sid, customer_info['name'])
-                                
-                                # Play clarifying message asking for clear yes/no response
-                                clarification_msg = {
-                                    "en-IN": "Please say 'yes' if you want to speak to an agent, or 'no' if you don't need assistance.",
-                                    "hi-IN": "कृपया 'हां' कहें यदि आप एजेंट से बात करना चाहते हैं, या 'नहीं' कहें यदि आपको सहायता की आवश्यकता नहीं है।",
-                                    "ta-IN": "நீங்கள் ஒரு முகவரிடம் பேச விரும்பினால் 'ஆம்' என்று சொல்லுங்கள், அல்லது உங்களுக்கு உதவி தேவையில்லை என்றால் 'இல்லை' என்று சொல்லுங்கள்।"
-                                }
-                                clarify_text = clarification_msg.get(call_detected_lang, clarification_msg["en-IN"])
-                                audio_bytes = await sarvam_handler.synthesize_tts(clarify_text, call_detected_lang)
-                                await stream_audio_to_websocket(websocket, audio_bytes)
-                                
-                                # Reset counter for final attempt
-                                agent_question_repeat_count = 0
-                                last_transcription_time = time.time()
-                        audio_buffer.clear()
-                        last_transcription_time = now
-                        continue
-
-                    try:
-                        transcript = await sarvam_handler.transcribe_from_payload(audio_buffer)
-                        if isinstance(transcript, tuple):
-                            transcript_text, detected_language = transcript
-                            if detected_language and detected_language != "en-IN":
-                                call_detected_lang = detected_language
-                                logger.websocket.info(f"🌐 Language updated from transcription: {call_detected_lang}")
-                            transcript = transcript_text
-                        elif isinstance(transcript, str):
-                            pass
-                        else:
-                            transcript = ""
-                        
-                        logger.websocket.info(f"📝 Transcript: {transcript}")
-                        logger.log_call_event("TRANSCRIPT_RECEIVED", call_sid, customer_info['name'], {"transcript": transcript, "stage": conversation_stage})
-
-                        if transcript:
-                            if conversation_stage == "WAITING_FOR_LANG_DETECT":
-                                # Detect user's preferred language from their response
-                                user_detected_lang = detect_language(transcript)
-                                logger.websocket.info(f"🎯 User Response Language Detection:")
-                                logger.websocket.info(f"   📍 State-mapped language: {initial_greeting_language}")
-                                logger.websocket.info(f"   🗣️  User detected language: {user_detected_lang}")
-                                logger.websocket.info(f"   📄 CSV language: {csv_language}")
-                                logger.log_call_event("LANGUAGE_DETECTED", call_sid, customer_info['name'], {
-                                    "detected_lang": user_detected_lang, 
-                                    "state_lang": initial_greeting_language,
-                                    "csv_lang": csv_language,
-                                    "transcript": transcript
-                                })
-                                
-                                # Enhanced Language Switching Logic
-                                if user_detected_lang != initial_greeting_language:
-                                    logger.websocket.info(f"🔄 Language Mismatch Detected!")
-                                    logger.websocket.info(f"   Initial greeting was in: {initial_greeting_language}")
-                                    logger.websocket.info(f"   User responded in: {user_detected_lang}")
-                                    logger.websocket.info(f"   🔄 Switching entire conversation to: {user_detected_lang}")
-                                    logger.log_call_event("LANGUAGE_SWITCH_DETECTED", call_sid, customer_info['name'], {
-                                        "from_lang": initial_greeting_language,
-                                        "to_lang": user_detected_lang,
-                                        "reason": "user_preference"
-                                    })
-                                    
-                                    # Replay greeting in user's preferred language
-                                    try:
-                                        logger.websocket.info(f"🔁 Replaying greeting in user's language: {user_detected_lang}")
-                                        await greeting_template_play(websocket, customer_info, lang=user_detected_lang)
-                                        logger.websocket.info(f"✅ Successfully replayed greeting in {user_detected_lang}")
-                                        logger.log_call_event("GREETING_REPLAYED_NEW_LANG", call_sid, customer_info['name'], {"new_lang": user_detected_lang})
-                                        
-                                        # Update the conversation language to user's preference
-                                        call_detected_lang = user_detected_lang
-                                        
-                                        # Give user a moment to acknowledge the language switch
-                                        await asyncio.sleep(1)
-                                        
-                                    except Exception as e:
-                                        logger.websocket.error(f"❌ Error replaying greeting in {user_detected_lang}: {e}")
-                                        logger.log_call_event("GREETING_REPLAY_ERROR", call_sid, customer_info['name'], {"error": str(e)})
-                                        # Fallback to user's detected language anyway
-                                        call_detected_lang = user_detected_lang
-                                        
-                                else:
-                                    logger.websocket.info(f"✅ Language Consistency Confirmed!")
-                                    logger.websocket.info(f"   User responded in same language as greeting: {user_detected_lang}")
-                                    logger.log_call_event("LANGUAGE_CONSISTENT", call_sid, customer_info['name'], {"language": user_detected_lang})
-                                    call_detected_lang = user_detected_lang
-                                
-                                # Final language confirmation
-                                logger.websocket.info(f"🎉 Final Conversation Language: {call_detected_lang}")
-                                logger.log_call_event("FINAL_LANGUAGE_SET", call_sid, customer_info['name'], {"final_lang": call_detected_lang})
-                                
-                                try:
-                                    await play_emi_details_part1(websocket, customer_info or {}, call_detected_lang)
-                                    await play_emi_details_part2(websocket, customer_info or {}, call_detected_lang)
-                                    await play_agent_connect_question(websocket, call_detected_lang)
-                                    conversation_stage = "WAITING_AGENT_RESPONSE"
-                                    logger.tts.info(f"✅ EMI details and agent question sent successfully in {call_detected_lang}")
-                                    logger.websocket.info(f"🎯 CONVERSATION STAGE SET TO: WAITING_AGENT_RESPONSE - Now waiting for user response to agent connect question")
-                                    logger.log_call_event("EMI_DETAILS_SENT", call_sid, customer_info['name'], {"language": call_detected_lang})
-                                    # Clear audio buffer to ensure fresh start for agent response detection
-                                    audio_buffer.clear()
-                                    last_transcription_time = time.time()
-                                except Exception as e:
-                                    logger.tts.error(f"❌ Error playing EMI details: {e}")
-                                    logger.log_call_event("EMI_DETAILS_ERROR", call_sid, customer_info['name'], {"error": str(e)})
-                            
-                            elif conversation_stage == "WAITING_AGENT_RESPONSE":
-                                # ⚠️ CRITICAL: Validate transcript before intent detection to prevent false agent transfers
-                                transcript_clean = transcript.strip()
-                                
-                                # Skip intent detection for empty, too short, or invalid transcripts
-                                if not transcript_clean or len(transcript_clean) < 2:
-                                    logger.websocket.info(f"🚫 Skipping intent detection - transcript too short: '{transcript_clean}'")
-                                    logger.log_call_event("TRANSCRIPT_TOO_SHORT", call_sid, customer_info['name'], {"transcript": transcript_clean, "length": len(transcript_clean)})
-                                    audio_buffer.clear()
-                                    last_transcription_time = now
-                                    continue
-                                
-                                # Additional validation: Check for meaningful content (at least one alphabetic character)
-                                if not any(c.isalpha() for c in transcript_clean):
-                                    logger.websocket.info(f"🚫 Skipping intent detection - no alphabetic content: '{transcript_clean}'")
-                                    logger.log_call_event("TRANSCRIPT_NO_LETTERS", call_sid, customer_info['name'], {"transcript": transcript_clean})
-                                    audio_buffer.clear()
-                                    last_transcription_time = now
-                                    continue
-                                
-                                logger.websocket.info(f"🎯 Processing valid transcript for intent: '{transcript_clean}'")
-                                
-                                try:
-                                    intent = detect_intent_with_claude(transcript_clean, call_detected_lang)
-                                    logger.websocket.info(f"Claude detected intent: {intent}")
-                                    logger.log_call_event("INTENT_DETECTED_CLAUDE", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript_clean})
-                                except Exception as e:
-                                    logger.websocket.error(f"❌ Error in Claude intent detection: {e}")
-                                    intent = detect_intent_fur(transcript_clean, call_detected_lang)
-                                    logger.websocket.info(f"Fallback intent detection: {intent}")
-                                    logger.log_call_event("INTENT_DETECTED_FALLBACK", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript_clean})
-
-                                # 🛡️ STRICT INTENT HANDLING - Only process clear, confident intents
-                                if intent == "affirmative" or intent == "agent_transfer":
-                                    if conversation_stage != "TRANSFERRING_TO_AGENT":
-                                        logger.websocket.info(f"✅ CONFIRMED: User affirmed agent transfer. Intent: {intent}, Transcript: '{transcript_clean}'")
-                                        logger.log_call_event("AGENT_TRANSFER_INITIATED", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript_clean})
-                                        customer_number = customer_info.get('phone', '08438019383') if customer_info else "08438019383"
-                                        await play_transfer_to_agent(websocket, customer_number=customer_number) 
-                                        conversation_stage = "TRANSFERRING_TO_AGENT"
-                                        interaction_complete = True
-                                        await asyncio.sleep(2)
-                                        break
-                                    else:
-                                        logger.websocket.warning("⚠️ Agent transfer already in progress, ignoring duplicate request")
-                                elif intent == "negative":
-                                    if conversation_stage != "GOODBYE_DECLINE":
-                                        logger.websocket.info(f"✅ CONFIRMED: User declined agent transfer. Intent: {intent}, Transcript: '{transcript_clean}'")
-                                        logger.log_call_event("AGENT_TRANSFER_DECLINED", call_sid, customer_info['name'], {"intent": intent, "transcript": transcript_clean})
-                                        await play_goodbye_after_decline(websocket, call_detected_lang)
-                                        conversation_stage = "GOODBYE_DECLINE"
-                                        interaction_complete = True
-                                        await asyncio.sleep(3)
-                                        break
-                                    else:
-                                        logger.websocket.warning("⚠️ Goodbye already sent, ignoring duplicate request")
-                                elif intent == "confused":
-                                    # User seems confused, repeat the question
-                                    logger.websocket.info(f"🔄 User seems confused. Repeating agent question. Transcript: '{transcript_clean}'")
-                                    logger.log_call_event("AGENT_QUESTION_CONFUSED_REPEAT", call_sid, customer_info['name'], {"transcript": transcript_clean})
-                                    await play_agent_connect_question(websocket, call_detected_lang)
-                                    last_transcription_time = time.time()
-                                elif intent == "unclear" or intent == "unknown":
-                                    # Handle unclear responses more carefully
-                                    agent_question_repeat_count += 1
-                                    logger.websocket.info(f"⚠️ Unclear response '{transcript_clean}' (intent: {intent}). Attempt {agent_question_repeat_count}/2")
-                                    
-                                    if agent_question_repeat_count <= 2:  # Limit to 2 repeats
-                                        logger.websocket.info(f"🔄 Repeating agent question due to unclear response (attempt {agent_question_repeat_count}/2).")
-                                        logger.log_call_event("AGENT_QUESTION_UNCLEAR_REPEAT", call_sid, customer_info['name'], {"attempt": agent_question_repeat_count, "transcript": transcript_clean, "intent": intent})
-                                        await play_agent_connect_question(websocket, call_detected_lang)
-                                        # Reset the timer to wait for user response
-                                        last_transcription_time = time.time()
-                                    else:
-                                        logger.websocket.warning("⚠️ Too many unclear responses. NOT automatically transferring - waiting for clear intent.")
-                                        logger.log_call_event("MAX_UNCLEAR_RESPONSES_REACHED", call_sid, customer_info['name'], {"final_transcript": transcript_clean})
-                                        # Reset counter and continue waiting instead of auto-transferring
-                                        agent_question_repeat_count = 0
-                                        await play_agent_connect_question(websocket, call_detected_lang)
-                                        last_transcription_time = time.time()
-                                else:
-                                    # Catch any other unexpected intents
-                                    logger.websocket.warning(f"⚠️ Unexpected intent '{intent}' for transcript '{transcript_clean}' - treating as unclear")
-                                    agent_question_repeat_count += 1
-                                    if agent_question_repeat_count <= 2:
-                                        await play_agent_connect_question(websocket, call_detected_lang)
-                                        last_transcription_time = time.time()
-                    except Exception as e:
-                        logger.websocket.error(f"❌ Error processing transcript: {e}")
-                        logger.log_call_event("TRANSCRIPT_PROCESSING_ERROR", call_sid, customer_info['name'] if customer_info else 'Unknown', {"error": str(e)})
-
-                    audio_buffer.clear()
-                    last_transcription_time = now
-
-    except Exception as e:
-        logger.error(f"WebSocket compatibility error: {e}")
-        logger.log_call_event("WEBSOCKET_COMPATIBILITY_ERROR", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown', {"error": str(e)})
-    finally:
-        # Ensure the websocket is closed gracefully only after conversation is complete
-        try:
-            if not interaction_complete:
-                # If we're exiting due to an error before conversation completion, wait a bit
-                await asyncio.sleep(1)
-            
-            if websocket.client_state.name not in ['DISCONNECTED']:
-                await websocket.close()
-                logger.websocket.info("🔒 WebSocket connection closed gracefully")
-            else:
-                logger.websocket.info("🔒 WebSocket already disconnected")
-        except Exception as close_error:
-            logger.error(f"Error closing WebSocket: {close_error}")
-        logger.log_call_event("WEBSOCKET_CLOSED_GRACEFUL", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown')
+    temp_call_id = query_params.get("temp_call_id")
+    call_sid = query_params.get("call_sid")
+    phone = query_params.get("phone")
+    await run_voice_session(
+        websocket=websocket,
+        session_id="compat",
+        temp_call_id=temp_call_id,
+        call_sid=call_sid,
+        phone=phone,
+        compat_mode=True,
+    )
 
 
 if __name__ == "__main__":
