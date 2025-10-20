@@ -6,11 +6,15 @@ from sarvamai import SarvamAI
 from sarvamai import AsyncSarvamAI, AudioOutput
 from fastapi import Body
 from .logger import logger
+import tempfile
+import os
+import time
 
 
 class SarvamHandler:
     def __init__(self, api_key):
         self.client = SarvamAI(api_subscription_key=api_key)
+        logger.info(f"✅ SarvamHandler initialized with API key: {'***' + api_key[-4:] if api_key else 'MISSING'}")
         
         # Language code mapping for proper BCP-47 format
         self.language_map = {
@@ -56,29 +60,71 @@ class SarvamHandler:
             audio.export(f.name, format="wav")
             return f.name
 
-    def transcribe_from_payload(self, audio_buffer: bytes) -> str:
+    def transcribe_from_payload(self, audio_buffer: bytes, max_retries: int = 2) -> str:
+        """
+        Convert SLIN raw audio to WAV and transcribe with retry logic.
+        Retry a small number of times if Sarvam returns empty transcript.
+        """
         logger.tts.info("🎙️ Converting SLIN base64 to WAV")
-
-        # Convert SLIN (raw 8kHz PCM mono) to WAV
-        audio = AudioSegment(
-            data=audio_buffer,
-            sample_width=2,  # 16-bit PCM
-            frame_rate=8000,
-            channels=1
-        )
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            audio.export(f.name, format="wav")
-            wav_path = f.name
-        logger.tts.info("🚀 Sending WAV to Sarvam API")
-        # Call Sarvam REST API directly
-        with open(wav_path, "rb") as wav_file:
-            response = self.client.speech_to_text.transcribe(
-                file=wav_file,
-                model="saarika:v2.5",
-                language_code="unknown"  # Make sure this matches your subscription
-            )
-        logger.tts.info(f"📝 Transcript received: {response.transcript}")
-        return response.transcript
+        
+        attempt = 0
+        last_error = None
+        
+        while attempt <= max_retries:
+            attempt += 1
+            try:
+                # Convert SLIN (raw 8kHz PCM mono) to WAV
+                audio = AudioSegment(
+                    data=audio_buffer,
+                    sample_width=2,  # 16-bit PCM
+                    frame_rate=8000,
+                    channels=1
+                )
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    audio.export(f.name, format="wav")
+                    wav_path = f.name
+                
+                logger.tts.info(f"🚀 Sending WAV to Sarvam API (attempt {attempt}/{max_retries + 1})")
+                
+                # Call Sarvam REST API directly
+                with open(wav_path, "rb") as wav_file:
+                    response = self.client.speech_to_text.transcribe(
+                        file=wav_file,
+                        model="saarika:v2.5",
+                        language_code="unknown"
+                    )
+                
+                # Clean up temp file
+                try:
+                    os.unlink(wav_path)
+                except:
+                    pass
+                
+                transcript = getattr(response, "transcript", "") or ""
+                logger.tts.info(f"📝 Transcript (attempt {attempt}): '{transcript[:120]}'")
+                
+                # Retry on empty transcripts with short backoff
+                if transcript and transcript.strip():
+                    return transcript
+                else:
+                    logger.tts.warning(f"⚠️ Empty transcript on attempt {attempt}, retrying...")
+                    last_error = None
+                    time.sleep(0.6 * attempt)
+                    continue
+                    
+            except Exception as e:
+                logger.tts.error(f"❌ Error during Sarvam transcription attempt {attempt}: {e}")
+                last_error = e
+                time.sleep(0.6 * attempt)
+                continue
+        
+        # After retries return empty string
+        if last_error:
+            logger.tts.error(f"❌ Transcription failed after {max_retries + 1} attempts: {last_error}")
+        else:
+            logger.tts.warning(f"⚠️ Transcription empty after {max_retries + 1} attempts")
+        
+        return ""
     
     async def synthesize_tts_end(self, text: str, lang: str) -> bytes:
         logger.tts.info(f"🔁 Starting text-to-speech for: {text} in {lang}")

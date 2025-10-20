@@ -2,13 +2,24 @@ import boto3
 import os
 import json
 from datetime import datetime, date
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Ensure Bedrock region is taken from environment (fall back to eu-north-1)
+BEDROCK_REGION = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION") or "eu-north-1"
 
 # Initialize the Bedrock runtime client globally in this module
-# Ensure the region_name matches your AWS Bedrock setup
-bedrock_runtime = boto3.client(
-    service_name='bedrock-runtime',
-    region_name='eu-north-1' # Make sure this matches your Bedrock region
-)
+try:
+    bedrock_runtime = boto3.client(
+        service_name='bedrock-runtime',
+        region_name=BEDROCK_REGION
+    )
+    logger.info(f"✅ Bedrock runtime client initialized in region: {BEDROCK_REGION}")
+except Exception as e:
+    bedrock_runtime = None
+    logger.error(f"❌ Failed to create Bedrock client (region={BEDROCK_REGION}): {e}")
+    logger.error("⚠️ Please check AWS credentials and region configuration on EC2")
 
 def parse_chat_history(chat_history_list):
     """
@@ -34,17 +45,27 @@ def parse_chat_history(chat_history_list):
     # For intent classification and summarization, we append a user message so it should be fine.
     return messages
 
-def invoke_claude_model(messages, model_id="arn:aws:bedrock:eu-north-1:844605843483:inference-profile/eu.anthropic.claude-3-7-sonnet-20250219-v1:0"):
+def invoke_claude_model(messages, model_id=None):
     """
     Helper function to invoke the Claude model with a given set of messages.
     """
+    if bedrock_runtime is None:
+        error_msg = "❌ Bedrock client not initialized. Check AWS_REGION/BEDROCK_REGION and AWS credentials on the host."
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+    
+    # Use env variable for model ID if not provided
+    if model_id is None:
+        model_id = os.getenv("CLAUDE_MODEL_ID") or os.getenv("CLAUDE_INTENT_MODEL_ID") or "arn:aws:bedrock:eu-north-1:844605843483:inference-profile/eu.anthropic.claude-3-7-sonnet-20250219-v1:0"
+    
     body = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 4096, # Adjust max_tokens as needed for your responses/summaries
+        "max_tokens": 4096,
         "messages": messages
     }
 
     try:
+        logger.info(f"🤖 Invoking Claude model: {model_id[:50]}...")
         response = bedrock_runtime.invoke_model(
             body=json.dumps(body),
             modelId=model_id,
@@ -58,11 +79,15 @@ def invoke_claude_model(messages, model_id="arn:aws:bedrock:eu-north-1:844605843
         for content_block in response_body.get('content', []):
             if content_block.get('type') == 'text':
                 generated_text += content_block['text']
+        
+        logger.info(f"✅ Claude response received: {generated_text[:100]}...")
         return generated_text
 
     except Exception as e:
-        print(f"❌ Error invoking Claude model: {e}")
-        raise # Re-raise the exception to be handled by the calling function
+        logger.error(f"❌ Error invoking Claude model: {e}")
+        logger.error(f"⚠️ Model ID: {model_id}")
+        logger.error(f"⚠️ Region: {BEDROCK_REGION}")
+        raise
 
 def generate_response(query_type, data, chat_history):
     """
