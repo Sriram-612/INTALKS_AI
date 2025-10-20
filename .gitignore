@@ -33,3 +33,9 @@ working/
 
 
 
+
+logs/
+*.log
+.log.
+.json.
+voice_bot/new_production_asr.py
