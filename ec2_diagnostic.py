@@ -205,6 +205,9 @@ def check_python_packages():
     """Check required Python packages"""
     print_section("6. PYTHON PACKAGES CHECK")
     
+    import subprocess
+    import sys
+    
     required_packages = [
         "fastapi", "uvicorn", "boto3", "sarvamai", "pydub", 
         "httpx", "sqlalchemy", "redis", "python-dotenv"
@@ -212,12 +215,26 @@ def check_python_packages():
     
     missing = []
     for package in required_packages:
+        # Use pip to check if package is installed (works with venv)
         try:
-            __import__(package.replace("-", "_"))
-            print(f"  ✅ {package:20s}: Installed")
-        except ImportError:
-            print(f"  ❌ {package:20s}: NOT INSTALLED")
-            missing.append(package)
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "show", package],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                print(f"  ✅ {package:20s}: Installed")
+            else:
+                # Try importing as fallback
+                try:
+                    __import__(package.replace("-", "_"))
+                    print(f"  ✅ {package:20s}: Installed")
+                except ImportError:
+                    print(f"  ❌ {package:20s}: NOT INSTALLED")
+                    missing.append(package)
+        except Exception as e:
+            print(f"  ⚠️  {package:20s}: Could not verify")
     
     if missing:
         print(f"\n  ⚠️  Missing packages: {', '.join(missing)}")

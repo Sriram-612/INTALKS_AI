@@ -246,7 +246,7 @@ CLAUDE_MODEL_ID = os.getenv("CLAUDE_MODEL_ID") or os.getenv("CLAUDE_INTENT_MODEL
 CLAUDE_SYSTEM_PROMPT = (
     os.getenv("CLAUDE_SYSTEM_PROMPT")
     or (
-        "You are Priya, a collections specialist calling from Intalks NGN Bank. "
+        "You are Priya, a collections specialist calling from South India Finvest Bank. "
         "Obtain a concrete repayment commitment for the overdue EMI. "
         "Respond in 1-2 short sentences and always append a tag in brackets at the end. "
         "Do not output JSON or code blocks; speak naturally as a human agent. "
