@@ -88,10 +88,45 @@ class Customer(Base):
     def language_code(self, value):
         self._language_code = value
     
-    # Legacy fields for backward compatibility - will be moved to loans table
-    loan_id = Column(String(50), nullable=True)  # Legacy field - deprecated
-    amount = Column(String(20), nullable=True)   # Legacy field - deprecated
-    due_date = Column(String(50), nullable=True) # Legacy field - deprecated
+    @property
+    def loan_id(self) -> Optional[str]:
+        """Backward-compatible accessor that surfaces the primary loan ID."""
+        if self.loans:
+            primary_loan = self.loans[0]
+            if getattr(primary_loan, "loan_id", None):
+                return primary_loan.loan_id
+        return getattr(self, "_legacy_loan_id", None)
+    
+    @loan_id.setter
+    def loan_id(self, value: Optional[str]) -> None:
+        # Preserve compatibility for older scripts without persisting to the DB
+        self._legacy_loan_id = value
+    
+    @property
+    def amount(self) -> Optional[str]:
+        """Backward-compatible accessor for outstanding amount."""
+        if self.loans:
+            primary_loan = self.loans[0]
+            if getattr(primary_loan, "outstanding_amount", None) is not None:
+                return str(primary_loan.outstanding_amount)
+        return getattr(self, "_legacy_amount", None)
+    
+    @amount.setter
+    def amount(self, value: Optional[str]) -> None:
+        self._legacy_amount = value
+    
+    @property
+    def due_date(self) -> Optional[str]:
+        """Backward-compatible accessor for the next due date."""
+        if self.loans:
+            primary_loan = self.loans[0]
+            if getattr(primary_loan, "next_due_date", None):
+                return primary_loan.next_due_date.isoformat()
+        return getattr(self, "_legacy_due_date", None)
+    
+    @due_date.setter
+    def due_date(self, value: Optional[str]) -> None:
+        self._legacy_due_date = value
     
     # Relationships
     loans = relationship("Loan", back_populates="customer", cascade="all, delete-orphan")
@@ -236,10 +271,45 @@ class Customer(Base):
     def language_code(self, value):
         self._language_code = value
     
-    # Legacy fields for backward compatibility - will be moved to loans table
-    loan_id = Column(String(50), nullable=True)  # Legacy field - deprecated
-    amount = Column(String(20), nullable=True)   # Legacy field - deprecated
-    due_date = Column(String(50), nullable=True) # Legacy field - deprecated
+    @property
+    def loan_id(self) -> Optional[str]:
+        """Backward-compatible accessor that surfaces the primary loan ID."""
+        if self.loans:
+            primary_loan = self.loans[0]
+            if getattr(primary_loan, "loan_id", None):
+                return primary_loan.loan_id
+        return getattr(self, "_legacy_loan_id", None)
+    
+    @loan_id.setter
+    def loan_id(self, value: Optional[str]) -> None:
+        # Preserve compatibility for older scripts without persisting to the DB
+        self._legacy_loan_id = value
+    
+    @property
+    def amount(self) -> Optional[str]:
+        """Backward-compatible accessor for outstanding amount."""
+        if self.loans:
+            primary_loan = self.loans[0]
+            if getattr(primary_loan, "outstanding_amount", None) is not None:
+                return str(primary_loan.outstanding_amount)
+        return getattr(self, "_legacy_amount", None)
+    
+    @amount.setter
+    def amount(self, value: Optional[str]) -> None:
+        self._legacy_amount = value
+    
+    @property
+    def due_date(self) -> Optional[str]:
+        """Backward-compatible accessor for the next due date."""
+        if self.loans:
+            primary_loan = self.loans[0]
+            if getattr(primary_loan, "next_due_date", None):
+                return primary_loan.next_due_date.isoformat()
+        return getattr(self, "_legacy_due_date", None)
+    
+    @due_date.setter
+    def due_date(self, value: Optional[str]) -> None:
+        self._legacy_due_date = value
     
     # Relationships
     loans = relationship("Loan", back_populates="customer", cascade="all, delete-orphan")
@@ -326,10 +396,13 @@ class FileUpload(Base):
     status = Column(String(50), default='processing', nullable=False)
     processing_errors = Column(JSON, nullable=True)
     
-    # Backward compatibility fields
-    file_path = Column(String(500), nullable=True)
-    upload_status = Column(String(50), nullable=True)  # Maps to status
-    upload_time = Column(DateTime, nullable=True)      # Maps to uploaded_at
+    @property
+    def file_path(self) -> Optional[str]:
+        return getattr(self, "_legacy_file_path", None)
+    
+    @file_path.setter
+    def file_path(self, value: Optional[str]) -> None:
+        self._legacy_file_path = value
     
     @property
     def upload_status(self):
@@ -428,23 +501,6 @@ class CallSession(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
-    # Backward compatibility fields
-    websocket_session_id = Column(String(100), nullable=True)  # WebSocket session ID
-    call_direction = Column(String(20), default='outbound', nullable=True)  # outbound, inbound
-    start_time = Column(DateTime, nullable=True)  # Maps to initiated_at
-    end_time = Column(DateTime, nullable=True)
-    duration = Column(Integer, nullable=True)  # Maps to duration_seconds
-    
-    # Exotel specific data
-    exotel_data = Column(JSON, nullable=True)  # Store raw Exotel response
-    agent_transfer_time = Column(DateTime, nullable=True)
-    agent_number = Column(String(20), nullable=True)
-    
-    # AI Conversation data
-    conversation_transcript = Column(JSON, nullable=True)  # Store conversation history
-    intent_detected = Column(String(100), nullable=True)
-    language_detected = Column(String(10), nullable=True)
-    
     # Backward compatibility properties
     @property
     def start_time(self):
@@ -461,6 +517,112 @@ class CallSession(Base):
     @duration.setter
     def duration(self, value):
         self.duration_seconds = value
+    
+    # --- Backward-compatible metadata handlers ---
+    def _get_metadata_value(self, key: str):
+        if not self.call_metadata:
+            return None
+        return self.call_metadata.get(key)
+
+    def _set_metadata_value(self, key: str, value):
+        metadata = dict(self.call_metadata or {})
+        if value is None:
+            metadata.pop(key, None)
+        else:
+            metadata[key] = value
+        self.call_metadata = metadata or None
+
+    def _get_metadata_datetime(self, key: str):
+        raw = self._get_metadata_value(key)
+        if not raw:
+            return None
+        if isinstance(raw, datetime):
+            return raw
+        try:
+            return datetime.fromisoformat(raw)
+        except Exception:
+            return None
+
+    def _set_metadata_datetime(self, key: str, value):
+        if value is None:
+            self._set_metadata_value(key, None)
+        else:
+            if isinstance(value, datetime):
+                self._set_metadata_value(key, value.isoformat())
+            else:
+                self._set_metadata_value(key, str(value))
+    
+    @property
+    def end_time(self) -> Optional[datetime]:
+        return self._get_metadata_datetime("end_time")
+
+    @end_time.setter
+    def end_time(self, value: Optional[datetime]) -> None:
+        self._set_metadata_datetime("end_time", value)
+
+    @property
+    def websocket_session_id(self) -> Optional[str]:
+        return self._get_metadata_value("websocket_session_id")
+
+    @websocket_session_id.setter
+    def websocket_session_id(self, value: Optional[str]) -> None:
+        self._set_metadata_value("websocket_session_id", value)
+
+    @property
+    def call_direction(self) -> Optional[str]:
+        return self._get_metadata_value("call_direction") or "outbound"
+
+    @call_direction.setter
+    def call_direction(self, value: Optional[str]) -> None:
+        self._set_metadata_value("call_direction", value)
+
+    @property
+    def agent_transfer_time(self) -> Optional[datetime]:
+        return self._get_metadata_datetime("agent_transfer_time")
+
+    @agent_transfer_time.setter
+    def agent_transfer_time(self, value: Optional[datetime]) -> None:
+        self._set_metadata_datetime("agent_transfer_time", value)
+
+    @property
+    def agent_number(self) -> Optional[str]:
+        return self._get_metadata_value("agent_number")
+
+    @agent_number.setter
+    def agent_number(self, value: Optional[str]) -> None:
+        self._set_metadata_value("agent_number", value)
+
+    @property
+    def exotel_data(self) -> Optional[dict]:
+        return self._get_metadata_value("exotel_data")
+
+    @exotel_data.setter
+    def exotel_data(self, value: Optional[dict]) -> None:
+        self._set_metadata_value("exotel_data", value)
+
+    @property
+    def conversation_transcript(self):
+        return self._get_metadata_value("conversation_transcript")
+
+    @conversation_transcript.setter
+    def conversation_transcript(self, value) -> None:
+        self._set_metadata_value("conversation_transcript", value)
+
+    @property
+    def intent_detected(self) -> Optional[str]:
+        return self._get_metadata_value("intent_detected")
+
+    @intent_detected.setter
+    def intent_detected(self, value: Optional[str]) -> None:
+        self._set_metadata_value("intent_detected", value)
+
+    @property
+    def language_detected(self) -> Optional[str]:
+        return self._get_metadata_value("language_detected")
+
+    @language_detected.setter
+    def language_detected(self, value: Optional[str]) -> None:
+        self._set_metadata_value("language_detected", value)
     
     # Relationships
     loan = relationship("Loan", back_populates="call_sessions")
@@ -711,11 +873,15 @@ def create_customer(session, customer_data: dict) -> Optional[Customer]:
             email=customer_data.get('email'),
             state=customer_data.get('state'),
             first_uploaded_at=datetime.utcnow(),
-            # Legacy fields
-            loan_id=customer_data.get('loan_id'),
-            amount=customer_data.get('amount'),
-            due_date=customer_data.get('due_date'),
         )
+        
+        # Preserve legacy values in-memory for compatibility layers
+        if customer_data.get('loan_id'):
+            customer.loan_id = customer_data.get('loan_id')
+        if customer_data.get('amount'):
+            customer.amount = customer_data.get('amount')
+        if customer_data.get('due_date'):
+            customer.due_date = customer_data.get('due_date')
         
         session.add(customer)
         session.commit()

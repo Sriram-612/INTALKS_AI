@@ -4,18 +4,20 @@ Production-Ready Rate Limiting and Audio Processing Handler
 Implements comprehensive rate limiting, fallback mechanisms, and language detection
 """
 import asyncio
-import time
 import base64
-import tempfile
 import io
-import os
 import json
+import math
+import os
+import tempfile
+import time
+from typing import Dict, Optional, Tuple
+
 import httpx
-from typing import Optional, Dict, Tuple
-from pydub import AudioSegment
-from sarvamai import SarvamAI
-from sarvamai import AsyncSarvamAI, AudioOutput
 from fastapi import Body
+from pydub import AudioSegment, effects
+from sarvamai import AsyncSarvamAI, AudioOutput, SarvamAI
+
 from .logger import logger
 
 
@@ -42,7 +44,23 @@ class ProductionSarvamHandler:
         # Audio buffering settings (more responsive)
         self.min_audio_duration = 1.0  # Minimum 1 second instead of 2
         self.max_audio_duration = 8.0  # Maximum 8 seconds to prevent memory issues
-        self.audio_quality_threshold = 500  # Lower threshold for better sensitivity
+        self.audio_quality_threshold = int(os.getenv("SARVAM_AUDIO_QUALITY_THRESHOLD", "250"))
+        self.speech_energy_threshold_dbfs = float(os.getenv("SARVAM_STT_DBFS_THRESHOLD", "-65"))
+        self.speech_peak_margin_db = float(os.getenv("SARVAM_STT_PEAK_MARGIN", "12"))
+
+        # TTS shaping for clearer, calmer voice
+        self.tts_pitch = float(os.getenv("SARVAM_TTS_PITCH", "0.05"))
+        self.tts_pace = float(os.getenv("SARVAM_TTS_PACE", "0.94"))
+        self.tts_loudness = float(os.getenv("SARVAM_TTS_LOUDNESS", "1.05"))
+        self.tts_sample_rate = int(os.getenv("SARVAM_TTS_SAMPLE_RATE", "22050"))
+        self.voice_clarity_high_pass_hz = max(0, int(os.getenv("SARVAM_TTS_HIGHPASS_HZ", "60")))
+        self.voice_warm_lowpass_hz = max(0, int(os.getenv("SARVAM_TTS_WARM_LOWPASS_HZ", "320")))
+        self.voice_warm_gain_db = float(os.getenv("SARVAM_TTS_WARM_GAIN_DB", "1.8"))
+        self.voice_presence_highpass_hz = max(0, int(os.getenv("SARVAM_TTS_PRESENCE_HIGHPASS_HZ", "2400")))
+        self.voice_presence_gain_db = float(os.getenv("SARVAM_TTS_PRESENCE_GAIN_DB", "0.9"))
+        self._supported_sample_rates = {8000, 16000, 22050, 24000}
+        if self.tts_sample_rate not in self._supported_sample_rates:
+            self.tts_sample_rate = 16000
         
         # Language code mapping for proper BCP-47 format
         self.language_map = {
@@ -178,14 +196,96 @@ class ProductionSarvamHandler:
 
     def _is_audio_quality_sufficient(self, audio_bytes: bytes) -> bool:
         """Check if audio has sufficient quality for transcription"""
-        if len(audio_bytes) < self.audio_quality_threshold:
+        if len(audio_bytes) < max(64, self.audio_quality_threshold):
             return False
-        
-        # Basic silence detection - check if audio has some variation
-        if len(set(audio_bytes[:100])) < 5:  # Too uniform, likely silence
+
+        # Look at the first 400 bytes (≈25ms) for amplitude variance
+        analysis_window = audio_bytes[: min(400, len(audio_bytes))]
+        amplitude_range = max(analysis_window) - min(analysis_window)
+
+        if amplitude_range <= 1:
             return False
-        
+
+        # Count unique values as a proxy for variation; allow quieter speech by lowering the bar
+        unique_values = len(set(analysis_window))
+        if unique_values <= 3:
+            return False
+
         return True
+
+    def _has_meaningful_speech(self, audio_segment: AudioSegment) -> bool:
+        """Determine if audio contains speech above the configured energy threshold."""
+        if audio_segment is None or len(audio_segment) == 0:
+            return False
+
+        duration_ms = len(audio_segment)
+        average_db = audio_segment.dBFS
+        if average_db == float("-inf") or math.isinf(average_db):
+            average_db = -120.0
+
+        peak_db = getattr(audio_segment, "max_dBFS", average_db)
+        if peak_db == float("-inf") or math.isinf(peak_db):
+            peak_db = average_db
+
+        if average_db >= self.speech_energy_threshold_dbfs:
+            return True
+
+        if peak_db >= self.speech_energy_threshold_dbfs + self.speech_peak_margin_db:
+            return True
+
+        # Longer utterances can be quieter; allow a little headroom below threshold
+        if duration_ms >= 1500 and average_db >= self.speech_energy_threshold_dbfs - 5:
+            return True
+
+        return False
+
+    def _post_process_tts_segment(self, audio_segment: AudioSegment) -> bytes:
+        """Normalize and filter TTS audio, then convert to 8kHz SLIN bytes."""
+        if audio_segment is None:
+            return b""
+
+        try:
+            processed = effects.normalize(audio_segment, headroom=0.5)
+        except Exception:
+            processed = audio_segment
+
+        processed = self._enrich_voice_tone(processed)
+
+        if self.voice_clarity_high_pass_hz:
+            try:
+                processed = processed.high_pass_filter(self.voice_clarity_high_pass_hz)
+            except Exception:
+                pass  # High-pass filtering is best-effort
+
+        processed = processed.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+        return processed.raw_data
+
+    def _enrich_voice_tone(self, segment: AudioSegment) -> AudioSegment:
+        """
+        Add gentle warmth and presence to make the synthetic voice feel more natural.
+        """
+        enriched = segment
+
+        if self.voice_warm_gain_db:
+            try:
+                warmth = enriched.low_pass_filter(self.voice_warm_lowpass_hz).apply_gain(self.voice_warm_gain_db)
+                enriched = enriched.overlay(warmth)
+            except Exception:
+                pass
+
+        if self.voice_presence_gain_db:
+            try:
+                presence = enriched.high_pass_filter(self.voice_presence_highpass_hz).apply_gain(self.voice_presence_gain_db)
+                enriched = enriched.overlay(presence)
+            except Exception:
+                pass
+
+        try:
+            enriched = enriched.fade_in(20).fade_out(40)
+        except Exception:
+            pass
+
+        return enriched
 
     async def detect_language_from_text(self, text: str) -> str:
         """
@@ -232,9 +332,9 @@ class ProductionSarvamHandler:
         Returns: (transcript, detected_language)
         """
         # Check audio quality first
-        if not self._is_audio_quality_sufficient(audio_buffer):
-            logger.tts.warning("🔇 Audio quality insufficient for transcription")
-            return "", customer_language or "en-IN"
+        quality_ok = self._is_audio_quality_sufficient(audio_buffer)
+        if not quality_ok:
+            logger.tts.warning("🔈 Audio quality appears low; attempting transcription for better sensitivity")
         
         # Check audio duration
         duration = self._estimate_audio_duration(audio_buffer)
@@ -259,6 +359,13 @@ class ProductionSarvamHandler:
                 frame_rate=8000,
                 channels=1
             )
+
+            has_speech = self._has_meaningful_speech(audio)
+            if not has_speech:
+                if not quality_ok:
+                    logger.tts.debug("🔇 Audio energy extremely low during fallback; still attempting transcription")
+                else:
+                    logger.tts.debug("🔈 Audio below speech energy threshold; proceeding for sensitivity")
             
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 wav_path = f.name
@@ -343,10 +450,10 @@ class ProductionSarvamHandler:
                 target_language_code=lang_code,
                 model="bulbul:v2",
                 speaker=self._select_voice(lang_code),  # Compatible speaker for bulbul:v2
-                pitch=1.0,        # Natural pitch
-                pace=1.0,         # Natural speaking pace
-                loudness=1.0,     # Natural volume
-                speech_sample_rate=8000, # Optimized for telephony (correct parameter name)
+                pitch=self.tts_pitch,
+                pace=self.tts_pace,
+                loudness=self.tts_loudness,
+                speech_sample_rate=self.tts_sample_rate,
                 enable_preprocessing=True  # Better handling of mixed content
             )
             
@@ -380,9 +487,7 @@ class ProductionSarvamHandler:
                         audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
                         logger.tts.info(f"📊 Direct audio loaded: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
                         
-                        # Convert to SLIN format (8kHz, mono, 16-bit)
-                        slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
-                        final_bytes = slin_audio.raw_data
+                        final_bytes = self._post_process_tts_segment(audio_segment)
                         
                         logger.tts.info(f"✅ SLIN audio ready: {len(final_bytes)} bytes, 8kHz mono")
                         return final_bytes
@@ -412,13 +517,10 @@ class ProductionSarvamHandler:
                             audio_segment = AudioSegment.from_wav(temp_file_path)
                             logger.tts.info(f"📊 WAV audio loaded: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
                         
-                        # Convert to SLIN format
-                        slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
-                        final_bytes = slin_audio.raw_data
+                        final_bytes = self._post_process_tts_segment(audio_segment)
                         
                         # Explicitly clean up objects
                         del audio_segment
-                        del slin_audio
                         gc.collect()  # Force garbage collection
                         
                     finally:
@@ -581,8 +683,12 @@ class ProductionSarvamHandler:
             audio.export(wav_path, format="wav")
         return wav_path
 
-    async def transcribe_from_payload(self, audio_buffer: bytes) -> str:
+    async def transcribe_from_payload(self, audio_buffer: bytes) -> tuple[str, str] | str:
         logger.tts.info("🎙️ Converting SLIN base64 to WAV")
+
+        quality_ok = self._is_audio_quality_sufficient(audio_buffer)
+        if not quality_ok:
+            logger.tts.debug("🔈 Audio payload below quality threshold; attempting transcription anyway")
 
         # Convert SLIN (raw 8kHz PCM mono) to WAV
         audio = AudioSegment(
@@ -591,6 +697,14 @@ class ProductionSarvamHandler:
             frame_rate=8000,
             channels=1
         )
+
+        has_speech = self._has_meaningful_speech(audio)
+        if not has_speech:
+            if not quality_ok:
+                logger.tts.debug("🔇 Audio energy extremely low; still attempting transcription")
+            else:
+                logger.tts.debug("🔈 Audio energy below speech threshold; continuing transcription for sensitivity")
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             audio.export(f.name, format="wav")
             wav_path = f.name
@@ -609,8 +723,14 @@ class ProductionSarvamHandler:
             except OSError as cleanup_err:
                 logger.tts.warning(f"⚠️ Failed to delete temp wav file {wav_path}: {cleanup_err}")
 
-        logger.tts.info(f"📝 Transcript received: {response.transcript}")
-        return response.transcript
+        transcript = response.transcript.strip() if hasattr(response, "transcript") else ""
+        if not transcript:
+            logger.tts.info("📝 Transcript empty after STT call")
+            return "", "en-IN"
+
+        detected_language = await self.detect_language_from_text(transcript)
+        logger.tts.info(f"📝 Transcript received: {transcript} (lang: {detected_language})")
+        return transcript, detected_language
 
     # Additional legacy TTS methods for compatibility
     async def synthesize_tts_direct(self, text: str, lang: str) -> bytes:

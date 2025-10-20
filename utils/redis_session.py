@@ -215,28 +215,43 @@ class RedisSessionManager:
     
     def link_session_to_sid(self, temp_call_id: str, official_call_sid: str):
         """Link a temporary call session to the official Exotel CallSid"""
-        # Get the temporary call session data
-        temp_data = self.get_temp_data(temp_call_id)
-        if temp_data:
-            # Create a new session with the official CallSid
-            self.create_call_session(official_call_sid, temp_data.get('customer_data', {}), temp_data.get('websocket_id'))
-            
-            # Transfer any conversation history
-            if 'conversation_history' in temp_data:
-                session_data = self.get_call_session(official_call_sid)
-                if session_data:
-                    session_data['conversation_history'] = temp_data['conversation_history']
-                    key = f"call_session:{official_call_sid}"
-                    self.redis_client.setex(key, self.call_session_ttl, json.dumps(session_data))
-            
-            # Clean up temporary session
-            self.remove_temp_data(temp_call_id)
-            
-            print(f"✅ [Redis] Linked temp session {temp_call_id} to CallSid {official_call_sid}")
-            return True
-        else:
-            print(f"⚠️ [Redis] No temp session found for {temp_call_id}")
+        # Prefer the structured call_session entry; fall back to generic temp storage
+        session_data = self.get_call_session(temp_call_id)
+        if not session_data:
+            temp_data = self.get_temp_data(temp_call_id)
+            if isinstance(temp_data, dict):
+                # Normalise into call_session structure
+                session_data = {
+                    'call_sid': temp_call_id,
+                    'customer_data': temp_data.get('customer_data', temp_data),
+                    'websocket_id': temp_data.get('websocket_id'),
+                    'status': temp_data.get('status', 'initiated'),
+                    'created_at': temp_data.get('created_at', datetime.utcnow().isoformat()),
+                    'conversation_history': temp_data.get('conversation_history', []),
+                    'status_history': temp_data.get('status_history', [])
+                }
+        if not session_data:
+            print(f"⚠️ [Redis] No session data found for {temp_call_id}")
             return False
+
+        # Update identifiers and expiry
+        session_data['call_sid'] = official_call_sid
+        session_data['updated_at'] = datetime.utcnow().isoformat()
+
+        key_official = f"call_session:{official_call_sid}"
+        self.redis_client.setex(key_official, self.call_session_ttl, json.dumps(session_data))
+
+        # Remove old temporary entries
+        self.redis_client.delete(f"call_session:{temp_call_id}")
+        self.remove_temp_data(temp_call_id)
+
+        # Ensure the websocket session (if any) knows about the official CallSid
+        websocket_id = session_data.get('websocket_id')
+        if websocket_id:
+            self.link_call_to_websocket(websocket_id, official_call_sid)
+
+        print(f"✅ [Redis] Linked temp session {temp_call_id} to CallSid {official_call_sid}")
+        return True
      # ------------------------------------------------------------------
     # Event broadcasting helpers
     # ------------------------------------------------------------------

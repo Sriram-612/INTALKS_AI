@@ -11,19 +11,34 @@ import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 import httpx
+import io
 import os
+import pandas as pd
+import re
 from urllib.parse import urlencode
 from dotenv import load_dotenv
 
 from database.schemas import (
-    DatabaseManager, Customer, CallSession,
-    CallStatus, get_customer_by_phone, create_customer, create_call_session,
-    update_call_status, get_call_session_by_sid, db_manager,
-    update_customer_call_status
+    DatabaseManager,
+    Customer,
+    CallSession,
+    CallStatus,
+    FileUpload,
+    create_customer,
+    create_call_session,
+    create_loan,
+    db_manager,
+    get_call_session_by_sid,
+    get_customer_by_phone,
+    get_loan_by_external_id,
+    update_call_status,
+    update_customer_call_status,
+    compute_fingerprint,
 )
 from utils.redis_session import redis_manager
 from utils.handler_asr import SarvamHandler
 from utils.logger import logger
+from utils.json_encoder import convert_to_json_serializable
 
 load_dotenv()
 
@@ -116,11 +131,15 @@ class CallManagementService:
                     
                     logger.info(f"✅ Customer entry created: {customer.full_name} (Upload Date: {current_upload_date})")
                     
+                    loan_record = None
+                    
                     # Create loan record if loan data exists
                     if customer_data.get('loan_id') and customer.id:
                         existing_loan = get_loan_by_external_id(session, customer_data['loan_id'])
                         
-                        if not existing_loan:
+                        if existing_loan:
+                            loan_record = existing_loan
+                        else:
                             # Create new loan record
                             loan_data = {
                                 'customer_id': customer.id,
@@ -166,18 +185,38 @@ class CallManagementService:
                                 except Exception as e:
                                     logger.warning(f"Invalid last paid date format for loan {customer_data['loan_id']}: {customer_data['last_paid_date']} - {e}")
                             
-                            loan = create_loan(session, loan_data)
-                            logger.info(f"Created loan: {loan.loan_id} for customer {customer.name}")
+                            loan_record = create_loan(session, loan_data)
+                            logger.info(f"Created loan: {loan_record.loan_id} for customer {customer.name}")
+                    else:
+                        # Attempt to reuse first associated loan if it exists
+                        loan_record = customer.loans[0] if customer.loans else None
                     
                     # Add processed customer to results
+                    primary_loan = loan_record or (customer.loans[0] if customer.loans else None)
+                    outstanding_amount = None
+                    due_amount = None
+                    due_date_str = None
+                    
+                    if primary_loan:
+                        if getattr(primary_loan, "outstanding_amount", None) is not None:
+                            outstanding_amount = float(primary_loan.outstanding_amount)
+                        if getattr(primary_loan, "due_amount", None) is not None:
+                            due_amount = float(primary_loan.due_amount)
+                        if getattr(primary_loan, "next_due_date", None):
+                            due_date_str = primary_loan.next_due_date.isoformat()
+                    
                     processed_customers.append({
                         'id': str(customer.id),
                         'name': customer.name,
                         'phone_number': customer.phone_number,
                         'state': customer.state,
-                        'loan_id': customer.loan_id,
-                        'amount': customer.amount,
-                        'due_date': customer.due_date,
+                        'loan_id': primary_loan.loan_id if primary_loan else customer_data.get('loan_id'),
+                        'amount': (
+                            f"{outstanding_amount:.2f}" if outstanding_amount is not None
+                            else customer_data.get('amount')
+                        ),
+                        'due_date': due_date_str or customer_data.get('due_date'),
+                        'due_amount': due_amount if due_amount is not None else customer_data.get('due_amount'),
                         'upload_date': current_upload_date.isoformat(),
                         'language_code': getattr(customer, 'language_code', 'hi-IN')
                     })
@@ -268,15 +307,38 @@ class CallManagementService:
             loan = customer.loans[0] if customer.loans else None
             
             # Create Redis session with temp_call_id
+            customer_name = (customer.full_name or customer.name or customer.primary_phone or "Customer")
+            primary_phone = customer.primary_phone or getattr(customer, "phone_number", None) or ""
+            state = customer.state or ""
+
+            loan_id = 'N/A'
+            amount_value = None
+            due_date_value = None
+            if loan:
+                loan_id = loan.loan_id or loan_id
+                if loan.outstanding_amount is not None:
+                    amount_value = str(loan.outstanding_amount)
+                if loan.due_amount is not None:
+                    amount_value = str(loan.due_amount)
+                if loan.next_due_date:
+                    due_date_value = loan.next_due_date.isoformat()
+            else:
+                # Fallback to legacy fields if loan relationship missing
+                loan_id = getattr(customer, "loan_id", None) or loan_id
+                amount_value = getattr(customer, "amount", None) or amount_value
+                due_date_value = getattr(customer, "due_date", None) or due_date_value
+
             customer_data = {
                 'id': str(customer.id),
-                'name': customer.full_name,  # Changed from customer.name to customer.full_name
-                'phone_number': customer.primary_phone,  # Changed from customer.phone_number
-                'state': customer.state,
-                'loan_id': loan.loan_id if loan else 'N/A',
-                'amount': float(loan.outstanding_amount) if loan and loan.outstanding_amount else 0,
-                'due_date': loan.next_due_date.isoformat() if loan and loan.next_due_date else None,
-                'language_code': 'en-IN',  # Default language
+                'name': customer_name,
+                'phone': primary_phone,
+                'phone_number': primary_phone,
+                'state': state,
+                'loan_id': loan_id,
+                'amount': amount_value if amount_value is not None else "0",
+                'due_amount': amount_value if amount_value is not None else "0",
+                'due_date': due_date_value,
+                'language_code': getattr(customer, "language_code", None) or 'en-IN',
                 'temp_call_id': temp_call_id
             }
             

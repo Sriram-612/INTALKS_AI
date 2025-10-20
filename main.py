@@ -191,7 +191,7 @@ async def lifespan(app: FastAPI):
         logger.app.info("✅ Database initialized successfully")
         logger.database.info("Database connection established")
     else:
-        logger.error.error("❌ Database initialization failed")
+        logger.error("❌ Database initialization failed")
         logger.database.error("Failed to establish database connection")
     
     # Initialize Redis
@@ -267,7 +267,7 @@ if CLAUDE_MODEL_ID:
         claude_runtime_client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
         logger.app.info("🤖 Claude client configured")
     except Exception as claude_err:
-        logger.error.error(f"❌ Failed to configure Claude client: {claude_err}")
+        logger.error(f"❌ Failed to configure Claude client: {claude_err}")
         claude_runtime_client = None
 else:
     logger.app.warning("⚠️ CLAUDE_MODEL_ID not set; Claude voice handoff disabled")
@@ -282,10 +282,12 @@ class ClaudeChatSession:
         self.context = context
         self.messages: List[Dict[str, Any]] = []
         base_prompt = CLAUDE_SYSTEM_PROMPT or ""
+        today_str = datetime.now(IST).strftime("%B %d, %Y")
         context_prompt = (
-            "Caller details: name={name}, loan_id={loan_id}, phone={phone}. "
+            "Today is {today}. Caller details: name={name}, loan_id={loan_id}, phone={phone}. "
             "The EMI is overdue; ask about repayment timing."
         ).format(
+            today=today_str,
             name=context.get("name") or "customer",
             loan_id=context.get("loan_id") or "unknown",
             phone=context.get("phone") or "unknown",
@@ -349,7 +351,7 @@ class ClaudeChatManager:
             self.sessions[call_sid] = session
             return session
         except Exception as err:
-            logger.error.error(f"❌ Unable to start Claude chat for {call_sid}: {err}")
+            logger.error(f"❌ Unable to start Claude chat for {call_sid}: {err}")
             return None
     
     def get_session(self, call_sid: str) -> Optional[ClaudeChatSession]:
@@ -703,7 +705,7 @@ async def stream_audio_to_websocket(websocket, audio_bytes):
     except RuntimeError as runtime_err:
         logger.websocket.warning(f"⚠️ RuntimeError while streaming audio: {runtime_err}")
     except Exception as exc:
-        logger.error.error(f"❌ Error streaming audio to websocket: {exc}")
+        logger.error(f"❌ Error streaming audio to websocket: {exc}")
         raise
 
 async def play_transfer_to_agent(websocket, customer_number: str, call_sid: str, customer_name: str = None):
@@ -722,7 +724,7 @@ async def play_transfer_to_agent(websocket, customer_number: str, call_sid: str,
         # 2. Get agent number from environment
         agent_number = os.getenv("AGENT_PHONE_NUMBER")
         if not agent_number:
-            logger.error.error("❌ No AGENT_PHONE_NUMBER set in environment variables")
+            logger.error("❌ No AGENT_PHONE_NUMBER set in environment variables")
             return
 
         # 3. Trigger Exotel transfer
@@ -766,7 +768,7 @@ async def play_transfer_to_agent(websocket, customer_number: str, call_sid: str,
             logger.websocket.error(f"❌ Failed to notify frontend about agent transfer: {e}")
 
     except Exception as e:
-        logger.error.error(f"❌ play_transfer_to_agent failed: {e}")
+        logger.error(f"❌ play_transfer_to_agent failed: {e}")
 
 
 # --- Language and Intent Detection ---
@@ -1075,7 +1077,7 @@ class TranscriptLogger:
             with self.file_path.open("a", encoding="utf-8") as file:
                 file.write(text)
         except Exception as exc:
-            logger.error.error(f"❌ Failed to write transcript log: {exc}")
+            logger.error(f"❌ Failed to write transcript log: {exc}")
 
 
 def parse_claude_response(raw: str) -> tuple[str, str]:
@@ -1300,7 +1302,7 @@ async def stream_audio_to_websocket(websocket, audio_bytes):
     except RuntimeError as runtime_err:
         logger.websocket.warning(f"⚠️ RuntimeError while streaming audio: {runtime_err}")
     except Exception as exc:
-        logger.error.error(f"❌ Error streaming audio to websocket: {exc}")
+        logger.error(f"❌ Error streaming audio to websocket: {exc}")
         raise
 
 
@@ -1391,7 +1393,7 @@ async def play_confirmation_prompt(websocket, customer_info: Dict[str, Any]) -> 
     name = customer_info.get("name") or "there"
     loan_suffix = _loan_suffix(customer_info.get("loan_id"))
     prompt = (
-        f"Hello {name}. I am a voice agent calling from a bank. "
+        f"Hello {name}. I am a voice agent calling from South India Finvest bank. "
         f"Am I speaking with {name} with the loan ID ending in {loan_suffix}?"
     )
     logger.tts.info(f"🔁 Confirmation prompt: {prompt}")
@@ -1399,7 +1401,7 @@ async def play_confirmation_prompt(websocket, customer_info: Dict[str, Any]) -> 
     await stream_audio_to_websocket(websocket, audio_bytes)
 
 async def play_connecting_prompt(websocket, language: str = "en-IN") -> None:
-    prompt = "Wait a second, I will connect you to our agent."
+    prompt = "Thank you for confirming your identity. Please wait a second."
     logger.tts.info(f"🔁 Connecting prompt: {prompt}")
     audio_bytes = await sarvam_handler.synthesize_tts(prompt, language or "en-IN")
     await stream_audio_to_websocket(websocket, audio_bytes)
@@ -2053,7 +2055,7 @@ async def play_audio_message(websocket, text: str, language_code: str = "en-IN")
         audio_data = await synthesize_speech(text, language_code)
 
         if not audio_data:
-            logger.error.error("❌ TTS synthesis failed, no audio generated")
+            logger.error("❌ TTS synthesis failed, no audio generated")
             return
 
         # Send audio chunks to Exotel via websocket
@@ -2061,7 +2063,7 @@ async def play_audio_message(websocket, text: str, language_code: str = "en-IN")
         logger.websocket.info("✅ Audio message sent to Exotel stream")
 
     except Exception as e:
-        logger.error.error(f"❌ Failed to play audio message: {e}")
+        logger.error(f"❌ Failed to play audio message: {e}")
 
 #Newly added...
 async def handle_voicebot_websocket(websocket: WebSocket, session_id: str, temp_call_id: str = None, call_sid: str = None, phone: str = None):
@@ -2123,29 +2125,40 @@ async def run_voice_session(
     def ensure_customer_info(info: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not info:
             return None
+        info = dict(info)
         if not info.get('name'):
-            return None
+            info['name'] = 'Customer'
+        phone_value = info.get('phone') or info.get('phone_number')
+        if phone_value:
+            info.setdefault('phone', phone_value)
+            info.setdefault('phone_number', phone_value)
         if not info.get('loan_id'):
             info['loan_id'] = 'unknown'
         if not info.get('amount'):
-            info['amount'] = 'the outstanding amount'
+            info['amount'] = info.get('due_amount') or 'the outstanding amount'
+        if not info.get('due_amount'):
+            info['due_amount'] = info.get('amount')
         if not info.get('due_date'):
             info['due_date'] = 'the due date'
         if not info.get('lang'):
-            info['lang'] = 'en-IN'
+            info['lang'] = info.get('language_code', 'en-IN')
         return info
 
     def format_amount(value: Optional[str]) -> str:
-        if not value:
-            return "the outstanding amount"
-        cleaned = ''.join(ch for ch in str(value) if ch.isdigit())
-        if not cleaned:
-            return str(value)
+        if value is None or value == '':
+            return 'the outstanding amount'
+
+        text_value = str(value).strip()
+        cleaned = (text_value.replace('₹', '').replace(',', '').replace(' ', ''))
+
         try:
-            num = int(cleaned)
-            return f"₹{num:,}"
+            num = float(cleaned)
         except ValueError:
-            return str(value)
+            return text_value
+
+        if num.is_integer():
+            return f"₹{int(num):,}"
+        return f"₹{num:,.2f}"
 
     strong_refusal_phrases = [
         "can't pay", "cannot pay", "won't pay", "will not pay", "not able to pay",
@@ -2212,7 +2225,7 @@ async def run_voice_session(
         return None
 
     async def handle_start_event(msg: Dict[str, Any]) -> bool:
-        nonlocal call_sid, customer_info, conversation_stage, last_transcription_time, claude_chat, current_language
+        nonlocal call_sid, customer_info, conversation_stage, last_transcription_time, claude_chat, current_language, phone
 
         stream_sid = (
             msg.get("streamSid")
@@ -2274,6 +2287,9 @@ async def run_voice_session(
                     'state': parsed.get('state', ''),
                 }
 
+        if info and not phone:
+            phone = info.get('phone') or info.get('phone_number')
+
         if not info and phone:
             info = await resolve_customer_from_db(phone)
 
@@ -2286,11 +2302,13 @@ async def run_voice_session(
             info = {
                 'name': 'Customer',
                 'phone': phone or 'Unknown',
+                'phone_number': phone or 'Unknown',
                 'loan_id': 'N/A',
                 'amount': '0',
                 'due_date': 'N/A',
                 'state': '',
-                'lang': 'en-IN'
+                'lang': 'en-IN',
+                'language_code': 'en-IN'
             }
             
             logger.websocket.warning(f"⚠️ Using fallback customer data: {info}")
@@ -2310,16 +2328,25 @@ async def run_voice_session(
             # Continue with the minimal data instead of failing
 
         customer_info = info
-        
-        # Ensure required fields exist with defaults
+
+        phone_value = phone or customer_info.get('phone') or customer_info.get('phone_number')
         customer_info.setdefault('name', 'Customer')
-        customer_info.setdefault('phone', phone or 'Unknown')
+        customer_info['phone'] = phone_value or 'Unknown'
+        customer_info.setdefault('phone_number', customer_info['phone'])
         customer_info.setdefault('loan_id', 'N/A')
         customer_info.setdefault('amount', '0')
+        customer_info.setdefault('due_amount', customer_info.get('amount'))
         customer_info.setdefault('due_date', 'N/A')
         customer_info.setdefault('state', '')
-        customer_info.setdefault('lang', 'en-IN')
-        
+        customer_info.setdefault('lang', customer_info.get('language_code', 'en-IN'))
+
+        if customer_info.get('amount') is not None:
+            customer_info['amount'] = str(customer_info['amount'])
+        if customer_info.get('due_amount') is not None:
+            customer_info['due_amount'] = str(customer_info['due_amount'])
+        if customer_info.get('due_date') is not None:
+            customer_info['due_date'] = str(customer_info['due_date'])
+
         current_language = customer_info['lang']
         
         # Initialize transcript logger with customer info
@@ -2360,7 +2387,7 @@ async def run_voice_session(
             claude_chat = claude_chat_manager.start_session(call_sid, customer_info)
             if claude_chat:
                 intro_prompt = (
-                    "The caller is now on the line. Introduce yourself as Priya from Intalks NGN Bank, "
+                    "The caller is now on the line. Introduce yourself as Priya from South India Finvest Bank, "
                     "briefly remind them about the overdue EMI amount of {amount}, and immediately ask "
                     "for a concrete repayment date. Keep it under two short sentences and append a "
                     "status tag [continue] at the end."
@@ -2592,7 +2619,7 @@ async def run_voice_session(
                     break
 
     except Exception as err:
-        logger.error.error(f"WebSocket error: {err}")
+        logger.error(f"WebSocket error: {err}")
         logger.log_call_event("WEBSOCKET_ERROR", call_sid or 'unknown', customer_info['name'] if customer_info else 'Unknown', {"error": str(err)})
     finally:
         claude_chat_manager.end_session(call_sid)
@@ -2605,7 +2632,7 @@ async def run_voice_session(
                 await websocket.close()
                 logger.websocket.info("🔒 WebSocket connection closed gracefully")
         except Exception as close_err:
-            logger.error.error(f"Error closing WebSocket: {close_err}")
+            logger.error(f"Error closing WebSocket: {close_err}")
 
         logger.log_call_event(
             "WEBSOCKET_CLOSED_GRACEFUL",
