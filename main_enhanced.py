@@ -33,6 +33,9 @@ load_dotenv()
 EXOTEL_SID = os.getenv("EXOTEL_SID")
 EXOTEL_TOKEN = os.getenv("EXOTEL_TOKEN")
 EXOTEL_FLOW_APP_ID = os.getenv("EXOTEL_FLOW_APP_ID")
+EXOTEL_VIRTUAL_NUMBER = os.getenv("EXOTEL_VIRTUAL_NUMBER")
+EXOTEL_TIME_LIMIT = os.getenv("EXOTEL_TIME_LIMIT", "3600")
+EXOTEL_RING_TIMEOUT = os.getenv("EXOTEL_RING_TIMEOUT", "15")
 # IST timezone setup
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -196,8 +199,8 @@ async def make_call(number: str):
                 "CallerId": EXOTEL_VIRTUAL_NUMBER,   # your Exotel virtual number
                 "Url": flow_url,                               # ✅ ExoML flow URL
                 "CallType": "trans",                           # ✅ Added proper call parameters
-                "TimeLimit": "3600",
-                "TimeOut": "30",
+                "TimeLimit": EXOTEL_TIME_LIMIT,
+                "TimeOut": EXOTEL_RING_TIMEOUT,
                 "StatusCallback": f"{BASE_URL}/passthru-handler"  # ✅ final status updates
             }
         )

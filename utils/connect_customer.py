@@ -18,7 +18,7 @@ EXOTEL_FLOW_APP_ID    = os.getenv("EXOTEL_FLOW_APP_ID")         # Exotel App ID
 EXOTEL_CUSTOMER_NO    = os.getenv("EXOTEL_CUSTOMER_NO")         # Optional override
 EXOTEL_STATUS_CALLBACK= os.getenv("EXOTEL_STATUS_CALLBACK")     # Optional
 EXOTEL_TIME_LIMIT     = os.getenv("EXOTEL_TIME_LIMIT", "60")    # Optional
-EXOTEL_TIMEOUT        = os.getenv("EXOTEL_TIMEOUT", "30")       # Optional
+EXOTEL_TIMEOUT        = os.getenv("EXOTEL_RING_TIMEOUT", os.getenv("EXOTEL_TIMEOUT", "15"))  # Optional
 
 def connect_customer_call():
     """

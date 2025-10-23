@@ -187,6 +187,7 @@ EXOTEL_SID = os.getenv("EXOTEL_SID")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
 EXOPHONE = os.getenv("EXOPHONE")
 EXOTEL_APP_ID = os.getenv("EXOTEL_APP_ID")
+EXOTEL_RING_TIMEOUT = os.getenv("EXOTEL_RING_TIMEOUT", "15")
 
 app = FastAPI()
 
@@ -200,7 +201,7 @@ def trigger_exotel_call(to_number: str):
         'Url': f"http://my.exotel.com/{EXOTEL_SID}/exoml/start_voice/{EXOTEL_APP_ID}",
         'CallType': 'trans',
         'TimeLimit': '300',
-        'TimeOut': '30',
+        'TimeOut': EXOTEL_RING_TIMEOUT,
         'CustomField': 'Zrosis_Call_01'
     }
 

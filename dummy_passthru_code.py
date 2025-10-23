@@ -13,6 +13,7 @@ EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_TOKEN")
 EXOTEL_VIRTUAL_NUMBER = os.getenv("EXOTEL_VIRTUAL_NUMBER")
 EXOTEL_FLOW_APP_ID = os.getenv("EXOTEL_FLOW_APP_ID")
+EXOTEL_RING_TIMEOUT = os.getenv("EXOTEL_RING_TIMEOUT", "15")
 
 app = FastAPI()
 
@@ -59,7 +60,7 @@ async def trigger_exotel_call_async(to_number: str, initial_lang: str = "en-IN")
         'Url': flow_url,
         'CallType': 'trans',
         'TimeLimit': '300',
-        'TimeOut': '30',
+        'TimeOut': EXOTEL_RING_TIMEOUT,
         'CustomField': f"lang={initial_lang}"
     }
     try:

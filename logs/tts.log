@@ -21776,3 +21776,97 @@ PermissionError: [WinError 32] The process cannot access the file because it is 
 2025-10-18 19:17:01 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
 2025-10-18 19:17:01 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 6734ms
 2025-10-18 19:17:01 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 107742 bytes, 8kHz mono
+2025-10-23 20:53:11 | INFO     | voice_assistant.tts | play_confirmation_prompt:810 | 🔁 Confirmation prompt: Hello Jagan Prasath J. I am a voice agent calling from a bank. Am I speaking with Jagan Prasath J with the loan ID ending in 005?
+2025-10-23 20:53:11 | INFO     | voice_assistant.tts | synthesize_tts:305 | 🔁 Starting text-to-speech synthesis (with translation)
+2025-10-23 20:53:11 | INFO     | voice_assistant.tts | synthesize_tts:335 | ✅ Text already in target language (en-IN)
+2025-10-23 20:53:11 | INFO     | voice_assistant.tts | synthesize_tts:338 | 🎤 Generating TTS audio...
+2025-10-23 20:53:12 | INFO     | voice_assistant.tts | synthesize_tts:358 | ✅ Received audio data from Sarvam API (length: 169720)
+2025-10-23 20:53:12 | INFO     | voice_assistant.tts | synthesize_tts:364 | 🔓 Decoded base64 audio (127290 bytes)
+2025-10-23 20:53:12 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
+2025-10-23 20:53:15 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 7953ms
+2025-10-23 20:53:15 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 127246 bytes, 8kHz mono
+2025-10-23 20:53:25 | INFO     | voice_assistant.tts | transcribe_from_payload:585 | 🎙️ Converting SLIN base64 to WAV
+2025-10-23 20:53:25 | INFO     | voice_assistant.tts | transcribe_from_payload:597 | 🚀 Sending WAV to Sarvam API
+2025-10-23 20:53:25 | INFO     | voice_assistant.tts | transcribe_from_payload:612 | 📝 Transcript received: Yes.
+2025-10-23 20:53:25 | INFO     | voice_assistant.tts | play_connecting_prompt:817 | 🔁 Connecting prompt: Wait a second, I will connect you to our agent.
+2025-10-23 20:53:25 | INFO     | voice_assistant.tts | synthesize_tts:305 | 🔁 Starting text-to-speech synthesis (with translation)
+2025-10-23 20:53:25 | INFO     | voice_assistant.tts | synthesize_tts:335 | ✅ Text already in target language (en-IN)
+2025-10-23 20:53:25 | INFO     | voice_assistant.tts | synthesize_tts:338 | 🎤 Generating TTS audio...
+2025-10-23 20:53:26 | INFO     | voice_assistant.tts | synthesize_tts:358 | ✅ Received audio data from Sarvam API (length: 52816)
+2025-10-23 20:53:26 | INFO     | voice_assistant.tts | synthesize_tts:364 | 🔓 Decoded base64 audio (39612 bytes)
+2025-10-23 20:53:26 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
+2025-10-23 20:53:26 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 2473ms
+2025-10-23 20:53:26 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 39568 bytes, 8kHz mono
+2025-10-23 20:53:32 | INFO     | voice_assistant.tts | synthesize_tts:305 | 🔁 Starting text-to-speech synthesis (with translation)
+2025-10-23 20:53:32 | INFO     | voice_assistant.tts | synthesize_tts:335 | ✅ Text already in target language (en-IN)
+2025-10-23 20:53:32 | INFO     | voice_assistant.tts | synthesize_tts:338 | 🎤 Generating TTS audio...
+2025-10-23 20:53:34 | INFO     | voice_assistant.tts | synthesize_tts:358 | ✅ Received audio data from Sarvam API (length: 225944)
+2025-10-23 20:53:34 | INFO     | voice_assistant.tts | synthesize_tts:364 | 🔓 Decoded base64 audio (169458 bytes)
+2025-10-23 20:53:34 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
+2025-10-23 20:53:34 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 10588ms
+2025-10-23 20:53:34 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 169414 bytes, 8kHz mono
+2025-10-23 20:55:15 | INFO     | voice_assistant.tts | play_confirmation_prompt:810 | 🔁 Confirmation prompt: Hello Jagan Prasath J. I am a voice agent calling from a bank. Am I speaking with Jagan Prasath J with the loan ID ending in 005?
+2025-10-23 20:55:15 | INFO     | voice_assistant.tts | synthesize_tts:305 | 🔁 Starting text-to-speech synthesis (with translation)
+2025-10-23 20:55:15 | INFO     | voice_assistant.tts | synthesize_tts:335 | ✅ Text already in target language (en-IN)
+2025-10-23 20:55:15 | INFO     | voice_assistant.tts | synthesize_tts:338 | 🎤 Generating TTS audio...
+2025-10-23 20:55:16 | INFO     | voice_assistant.tts | synthesize_tts:358 | ✅ Received audio data from Sarvam API (length: 169720)
+2025-10-23 20:55:16 | INFO     | voice_assistant.tts | synthesize_tts:364 | 🔓 Decoded base64 audio (127290 bytes)
+2025-10-23 20:55:16 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
+2025-10-23 20:55:16 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 7953ms
+2025-10-23 20:55:16 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 127246 bytes, 8kHz mono
+2025-10-23 21:11:32 | INFO     | voice_assistant.tts | play_confirmation_prompt:811 | 🔁 Confirmation prompt: Hello Jagan Prasath J. I am a voice agent calling from a bank. Am I speaking with Jagan Prasath J with the loan ID ending in 005?
+2025-10-23 21:11:32 | INFO     | voice_assistant.tts | synthesize_tts:305 | 🔁 Starting text-to-speech synthesis (with translation)
+2025-10-23 21:11:32 | INFO     | voice_assistant.tts | synthesize_tts:335 | ✅ Text already in target language (en-IN)
+2025-10-23 21:11:32 | INFO     | voice_assistant.tts | synthesize_tts:338 | 🎤 Generating TTS audio...
+2025-10-23 21:11:33 | INFO     | voice_assistant.tts | synthesize_tts:358 | ✅ Received audio data from Sarvam API (length: 165016)
+2025-10-23 21:11:33 | INFO     | voice_assistant.tts | synthesize_tts:364 | 🔓 Decoded base64 audio (123760 bytes)
+2025-10-23 21:11:33 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
+2025-10-23 21:11:34 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 7732ms
+2025-10-23 21:11:34 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 123716 bytes, 8kHz mono
+2025-10-23 21:57:42 | INFO     | voice_assistant.tts | play_confirmation_prompt:811 | 🔁 Confirmation prompt: Hello Jagan Prasath J. I am a voice agent calling from a bank. Am I speaking with Jagan Prasath J with the loan ID ending in 005?
+2025-10-23 21:57:42 | INFO     | voice_assistant.tts | synthesize_tts:305 | 🔁 Starting text-to-speech synthesis (with translation)
+2025-10-23 21:57:42 | INFO     | voice_assistant.tts | synthesize_tts:335 | ✅ Text already in target language (en-IN)
+2025-10-23 21:57:42 | INFO     | voice_assistant.tts | synthesize_tts:338 | 🎤 Generating TTS audio...
+2025-10-23 21:57:43 | INFO     | voice_assistant.tts | synthesize_tts:358 | ✅ Received audio data from Sarvam API (length: 169720)
+2025-10-23 21:57:43 | INFO     | voice_assistant.tts | synthesize_tts:364 | 🔓 Decoded base64 audio (127290 bytes)
+2025-10-23 21:57:43 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
+2025-10-23 21:57:44 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 7953ms
+2025-10-23 21:57:44 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 127246 bytes, 8kHz mono
+2025-10-23 22:10:15 | INFO     | voice_assistant.tts | play_confirmation_prompt:811 | 🔁 Confirmation prompt: Hello Jagan Prasath J. I am a voice agent calling from a bank. Am I speaking with Jagan Prasath J with the loan ID ending in 005?
+2025-10-23 22:10:15 | INFO     | voice_assistant.tts | synthesize_tts:305 | 🔁 Starting text-to-speech synthesis (with translation)
+2025-10-23 22:10:15 | INFO     | voice_assistant.tts | synthesize_tts:335 | ✅ Text already in target language (en-IN)
+2025-10-23 22:10:15 | INFO     | voice_assistant.tts | synthesize_tts:338 | 🎤 Generating TTS audio...
+2025-10-23 22:10:16 | INFO     | voice_assistant.tts | synthesize_tts:358 | ✅ Received audio data from Sarvam API (length: 165016)
+2025-10-23 22:10:16 | INFO     | voice_assistant.tts | synthesize_tts:364 | 🔓 Decoded base64 audio (123760 bytes)
+2025-10-23 22:10:16 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
+2025-10-23 22:10:16 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 7732ms
+2025-10-23 22:10:16 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 123716 bytes, 8kHz mono
+2025-10-23 22:17:58 | INFO     | voice_assistant.tts | play_confirmation_prompt:811 | 🔁 Confirmation prompt: Hello Jagan Prasath J. I am a voice agent calling from a bank. Am I speaking with Jagan Prasath J with the loan ID ending in 005?
+2025-10-23 22:17:58 | INFO     | voice_assistant.tts | synthesize_tts:305 | 🔁 Starting text-to-speech synthesis (with translation)
+2025-10-23 22:17:58 | INFO     | voice_assistant.tts | synthesize_tts:335 | ✅ Text already in target language (en-IN)
+2025-10-23 22:17:58 | INFO     | voice_assistant.tts | synthesize_tts:338 | 🎤 Generating TTS audio...
+2025-10-23 22:17:59 | INFO     | voice_assistant.tts | synthesize_tts:358 | ✅ Received audio data from Sarvam API (length: 165016)
+2025-10-23 22:17:59 | INFO     | voice_assistant.tts | synthesize_tts:364 | 🔓 Decoded base64 audio (123760 bytes)
+2025-10-23 22:17:59 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
+2025-10-23 22:17:59 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 7732ms
+2025-10-23 22:17:59 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 123716 bytes, 8kHz mono
+2025-10-23 22:18:09 | INFO     | voice_assistant.tts | transcribe_from_payload:585 | 🎙️ Converting SLIN base64 to WAV
+2025-10-23 22:18:09 | INFO     | voice_assistant.tts | transcribe_from_payload:597 | 🚀 Sending WAV to Sarvam API
+2025-10-23 22:18:10 | INFO     | voice_assistant.tts | transcribe_from_payload:612 | 📝 Transcript received: Yes.
+2025-10-23 22:18:10 | INFO     | voice_assistant.tts | play_connecting_prompt:818 | 🔁 Connecting prompt: Wait a second, I will connect you to our agent.
+2025-10-23 22:18:10 | INFO     | voice_assistant.tts | synthesize_tts:305 | 🔁 Starting text-to-speech synthesis (with translation)
+2025-10-23 22:18:10 | INFO     | voice_assistant.tts | synthesize_tts:335 | ✅ Text already in target language (en-IN)
+2025-10-23 22:18:10 | INFO     | voice_assistant.tts | synthesize_tts:338 | 🎤 Generating TTS audio...
+2025-10-23 22:18:10 | INFO     | voice_assistant.tts | synthesize_tts:358 | ✅ Received audio data from Sarvam API (length: 52816)
+2025-10-23 22:18:10 | INFO     | voice_assistant.tts | synthesize_tts:364 | 🔓 Decoded base64 audio (39612 bytes)
+2025-10-23 22:18:10 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
+2025-10-23 22:18:11 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 2473ms
+2025-10-23 22:18:11 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 39568 bytes, 8kHz mono
+2025-10-23 22:18:14 | INFO     | voice_assistant.tts | synthesize_tts:305 | 🔁 Starting text-to-speech synthesis (with translation)
+2025-10-23 22:18:14 | INFO     | voice_assistant.tts | synthesize_tts:335 | ✅ Text already in target language (en-IN)
+2025-10-23 22:18:14 | INFO     | voice_assistant.tts | synthesize_tts:338 | 🎤 Generating TTS audio...
+2025-10-23 22:18:15 | INFO     | voice_assistant.tts | synthesize_tts:358 | ✅ Received audio data from Sarvam API (length: 219012)
+2025-10-23 22:18:15 | INFO     | voice_assistant.tts | synthesize_tts:364 | 🔓 Decoded base64 audio (164258 bytes)
+2025-10-23 22:18:15 | INFO     | voice_assistant.tts | synthesize_tts:373 | 🎧 Converting audio to SLIN format...
+2025-10-23 22:18:16 | INFO     | voice_assistant.tts | synthesize_tts:381 | 📊 Direct audio loaded: 8000Hz, 1ch, 10263ms
+2025-10-23 22:18:16 | INFO     | voice_assistant.tts | synthesize_tts:387 | ✅ SLIN audio ready: 164214 bytes, 8kHz mono

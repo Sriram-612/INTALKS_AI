@@ -5059,3 +5059,18 @@
 2025-10-18 19:17:09 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 2181c5dd06d6d1dc8b2f035b7f2119ai
 2025-10-18 19:29:12 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 10afbb3a9cf953159e8f0896692419ai
 2025-10-18 19:30:08 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 2b28790603b39fe7e0dee258de3819ai
+2025-10-23 20:53:25 | INFO     | voice_assistant.calls | flush:441 | [TRANSCRIPT] CallSid=431d9db67531efc521a3e4fc0dcd19an | Yes.
+2025-10-23 20:53:32 | INFO     | voice_assistant.calls | flush:441 | [TRANSCRIPT] CallSid=431d9db67531efc521a3e4fc0dcd19an | [Claude] Hello Mr. Jagan Prasath, this is Priya from Intalks NGN Bank. I'm calling about your overdue EMI of ₹25,00,000 on loan LOAN005 - when can we expect your payment?
+2025-10-23 20:53:47 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 431d9db67531efc521a3e4fc0dcd19an
+2025-10-23 20:55:22 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: e42838cbf2374c1f1639309bcd6719an
+2025-10-23 20:55:23 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: e42838cbf2374c1f1639309bcd6719an
+2025-10-23 21:11:38 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 001ffd403b1c7da7a33cffa53fe619an
+2025-10-23 21:11:39 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 001ffd403b1c7da7a33cffa53fe619an
+2025-10-23 21:57:48 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 97a4c96cf463c0303e27cab0e8b819an
+2025-10-23 21:57:49 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 97a4c96cf463c0303e27cab0e8b819an
+2025-10-23 22:10:22 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: deb34509127ed06d6a97c3355fca19an
+2025-10-23 22:10:23 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: deb34509127ed06d6a97c3355fca19an
+2025-10-23 22:18:10 | INFO     | voice_assistant.calls | flush:442 | [TRANSCRIPT] CallSid=447143957fd53d9832e65ee6200b19an | Yes.
+2025-10-23 22:18:14 | INFO     | voice_assistant.calls | flush:442 | [TRANSCRIPT] CallSid=447143957fd53d9832e65ee6200b19an | [Claude] Hello Mr. Jagan Prasath, this is Priya from Intalks NGN Bank calling about your overdue EMI of ₹2,500,000 for loan LOAN005. When can we expect your payment?
+2025-10-23 22:18:16 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 447143957fd53d9832e65ee6200b19an
+2025-10-23 22:18:17 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 447143957fd53d9832e65ee6200b19an

@@ -17,3 +17,11 @@
 2025-10-18T13:46:58.117437 | Yes.
 2025-10-18T13:46:59.980907 | [Claude_raw] Thank you for confirming. So you'll be making the payment of ₹2,500,000 within two weeks, by July 5th, correct? [continue]
 2025-10-18T13:46:59.981443 | [Claude] Thank you for confirming. So you'll be making the payment of ₹2,500,000 within two weeks, by July 5th, correct?
+
+=== Call 431d9db67531efc521a3e4fc0dcd19an | Started 2025-10-23T15:23:25.965694 | Customer: Jagan Prasath J | Phone: +919940430392 ===
+2025-10-23T15:23:25.966379 | Yes.
+2025-10-23T15:23:32.791631 | [Claude] Hello Mr. Jagan Prasath, this is Priya from Intalks NGN Bank. I'm calling about your overdue EMI of ₹25,00,000 on loan LOAN005 - when can we expect your payment?
+
+=== Call 447143957fd53d9832e65ee6200b19an | Started 2025-10-23T16:48:10.152130 | Customer: Jagan Prasath J | Phone: +919940430392 ===
+2025-10-23T16:48:10.153672 | Yes.
+2025-10-23T16:48:14.592866 | [Claude] Hello Mr. Jagan Prasath, this is Priya from Intalks NGN Bank calling about your overdue EMI of ₹2,500,000 for loan LOAN005. When can we expect your payment?

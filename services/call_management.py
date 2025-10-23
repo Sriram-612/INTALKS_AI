@@ -40,6 +40,8 @@ class CallManagementService:
         self.exotel_virtual_number = os.getenv("EXOTEL_VIRTUAL_NUMBER")
         self.exotel_flow_app_id = os.getenv("EXOTEL_FLOW_APP_ID")
         self.agent_phone_number = os.getenv("AGENT_PHONE_NUMBER")
+        self.exotel_time_limit = os.getenv("EXOTEL_TIME_LIMIT", "3600")
+        self.exotel_ring_timeout = os.getenv("EXOTEL_RING_TIMEOUT", "15")
         
     async def upload_and_process_customers(
         self,
@@ -559,7 +561,7 @@ class CallManagementService:
         customer_data['temp_call_id'] = temp_call_id
 
         # We pass all customer data in the 'CustomField'. 
-        # The Passthru applet within the ExoML flow will send this data back to our /passthru-handler.
+        # The Passthru applet within the ExoML flow will send this data back to our status webhook.
         custom_field_data = {k: str(v) for k, v in customer_data.items()}
         custom_field_str = "|".join([f"{key}={value}" for key, value in custom_field_data.items()])
 
@@ -573,11 +575,11 @@ class CallManagementService:
             'CallerId': self.exotel_virtual_number,  # 🔥 FIXED: ExoPhone as caller ID
             'Url': flow_url,  # Flow URL remains the same
             'CallType': 'trans',
-            'TimeLimit': '3600',
-            'TimeOut': '30',
+            'TimeLimit': self.exotel_time_limit,
+            'TimeOut': self.exotel_ring_timeout,
             'CustomField': custom_field_str,
-           #'StatusCallback': f"{os.getenv('BASE_URL', 'https://3.108.35.213')}/exotel-webhook"
-            'StatusCallback': f"{os.getenv('BASE_URL', 'https://9a81252242ca.ngrok-free.app')}/passthru-handler"#for Active Status from passthrough
+            #'StatusCallback': f"{os.getenv('BASE_URL', 'https://3.108.35.213')}/exotel-webhook"
+            'StatusCallback': f"{os.getenv('BASE_URL', 'https://9a81252242ca.ngrok-free.app')}/status-callback"  # Use robust FastAPI webhook
         }
         
         print(f"🎯 [CHECKPOINT] Payload validation:")

@@ -72,6 +72,7 @@ from database.schemas import (
     init_database,
     update_call_status,
     get_call_session_by_sid,
+    get_customer_by_phone,
     update_customer_call_status_by_phone,
     update_customer_call_status,
 )
@@ -2429,11 +2430,16 @@ async def exotel_webhook(request: Request):
             "end":           (CallStatus.CALL_COMPLETED,   "Call completed"),
             "terminal":      (CallStatus.CALL_COMPLETED,   "Call completed"),
             "hangup":        (CallStatus.CALL_COMPLETED,   "Call completed"),
+            "customer_hangup": (CallStatus.CALL_COMPLETED, "Call completed (customer hung up)"),
+            "user_hangup":   (CallStatus.CALL_COMPLETED,   "Call completed (user hung up)"),
 
             # terminal (no connect → disconnected)
             "busy":          (CallStatus.DISCONNECTED,     "Call disconnected (busy)"),
             "no-answer":     (CallStatus.DISCONNECTED,     "Call disconnected before answer"),
             "no_answer":     (CallStatus.DISCONNECTED,     "Call disconnected before answer"),
+            "noanswer":      (CallStatus.DISCONNECTED,     "Call disconnected before answer"),
+            "not_answered":  (CallStatus.DISCONNECTED,     "Call disconnected before answer"),
+            "not-answered":  (CallStatus.DISCONNECTED,     "Call disconnected before answer"),
             "canceled":      (CallStatus.DISCONNECTED,     "Call disconnected (canceled)"),
             "cancelled":     (CallStatus.DISCONNECTED,     "Call disconnected (canceled)"),
 
@@ -2516,9 +2522,9 @@ async def exotel_webhook(request: Request):
             update_call_status(
                 session=session,
                 call_sid=call_session.call_sid,  # update the original parent row
-                new_status=mapped_status,
+                status=mapped_status,
                 message=status_message,
-                metadata={"webhook": payload},
+                extra_data={"webhook": payload},
             )
             session.commit()
             logger.database.info(
@@ -2945,6 +2951,8 @@ async def status_callback(request: Request):
         "end": "call_completed",
         "finished": "call_completed",
         "hangup": "call_completed",
+        "customer_hangup": "call_completed",
+        "user_hangup": "call_completed",
 
         # terminal (no connect)
         "busy": "disconnected",
@@ -3043,9 +3051,9 @@ async def status_callback(request: Request):
         updated_session = update_call_status(
             session=session,
             call_sid=call_session.call_sid,
-            new_status=normalized,
+            status=normalized,
             message=msg,
-            metadata={"webhook": payload},
+            extra_data={"webhook": payload},
         )
 
         # Mirror to customer state (string form)

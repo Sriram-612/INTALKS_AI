@@ -3531,15 +3531,20 @@
         // Update customer call status
         function updateCustomerCallStatus(customerId, status, message) {
             const customer = customers.find(c => c.id === customerId);
-            if (customer) {
-                const normalizedStatus = (status || 'ready').toLowerCase();
-                customer.call_status = normalizedStatus;
-                customer.status = normalizedStatus;
-                renderCustomerTable();
-                updateStatistics();
-                const statusLabel = formatStatusLabel(normalizedStatus);
-                logActivity(`Customer ${customer.full_name}: ${message || statusLabel}`);
+            if (!customer) {
+                logActivity(`ℹ️ Status update received for unknown customer (${customerId}). Refreshing data...`);
+                loadCustomerData(true);
+                return;
             }
+
+            const normalizedStatus = (status || 'ready').toLowerCase();
+            customer.call_status = normalizedStatus;
+            customer.status = normalizedStatus;
+
+            const statusLabel = formatStatusLabel(normalizedStatus);
+            logActivity(`Customer ${customer.full_name}: ${message || statusLabel}`);
+
+            applyFilters();
         }
 
         // Cleanup on page unload
