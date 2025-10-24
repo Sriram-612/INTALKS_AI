@@ -7,13 +7,11 @@ import redis
 import json
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional
 import os
-import logging
 from dotenv import load_dotenv
 
 load_dotenv()
-logger = logging.getLogger(__name__)
 
 class RedisSessionManager:
     def __init__(self):
@@ -22,41 +20,30 @@ class RedisSessionManager:
         self.redis_password = os.getenv('REDIS_PASSWORD', None)
         self.redis_db = int(os.getenv('REDIS_DB', 0))
         
-        # Connection pool for better performance (without SSL for compatibility)
+        # Connection pool for better performance
         self.pool = redis.ConnectionPool(
             host=self.redis_host,
             port=self.redis_port,
             password=self.redis_password,
             db=self.redis_db,
             decode_responses=True,
-            max_connections=50,
-            retry_on_timeout=True,
-            socket_connect_timeout=5,
-            socket_timeout=5
+            max_connections=20
         )
-        
         self.redis_client = redis.Redis(connection_pool=self.pool)
         
-        # Session expiration times (in seconds)
+        # Session expiration times
         self.websocket_session_ttl = 3600  # 1 hour
         self.call_session_ttl = 7200  # 2 hours
         self.temp_data_ttl = 1800  # 30 minutes
-        self.call_status_ttl = 86400  # 24 hours for call status
         
-        # Test connection on init
-        self.test_connection()
-    
-    def test_connection(self) -> bool:
-        """Test Redis connection and log the result"""
+    def test_connection(self):
+        """Test Redis connection"""
         try:
-            if self.redis_client.ping():
-                logger.info("✅ Redis connection successful")
-                return True
-            else:
-                logger.error("❌ Redis ping failed")
-                return False
+            self.redis_client.ping()
+            print("✅ Redis connection successful")
+            return True
         except Exception as e:
-            logger.error(f"❌ Redis connection failed: {e}")
+            print(f"❌ Redis connection failed: {e}")
             return False
     
     # WebSocket Session Management
@@ -215,44 +202,30 @@ class RedisSessionManager:
     
     def link_session_to_sid(self, temp_call_id: str, official_call_sid: str):
         """Link a temporary call session to the official Exotel CallSid"""
-        # Prefer the structured call_session entry; fall back to generic temp storage
-        session_data = self.get_call_session(temp_call_id)
-        if not session_data:
+        temp_session = self.get_call_session(temp_call_id)
+        if not temp_session:
             temp_data = self.get_temp_data(temp_call_id)
-            if isinstance(temp_data, dict):
-                # Normalise into call_session structure
-                session_data = {
-                    'call_sid': temp_call_id,
-                    'customer_data': temp_data.get('customer_data', temp_data),
-                    'websocket_id': temp_data.get('websocket_id'),
-                    'status': temp_data.get('status', 'initiated'),
-                    'created_at': temp_data.get('created_at', datetime.utcnow().isoformat()),
-                    'conversation_history': temp_data.get('conversation_history', []),
-                    'status_history': temp_data.get('status_history', [])
-                }
-        if not session_data:
-            print(f"⚠️ [Redis] No session data found for {temp_call_id}")
-            return False
+            if temp_data:
+                temp_session = temp_data
 
-        # Update identifiers and expiry
-        session_data['call_sid'] = official_call_sid
-        session_data['updated_at'] = datetime.utcnow().isoformat()
+        if temp_session:
+            customer_data = temp_session.get('customer_data', {})
+            websocket_id = temp_session.get('websocket_id')
+            conversation_history = temp_session.get('conversation_history', [])
+            status_history = temp_session.get('status_history', [])
 
-        key_official = f"call_session:{official_call_sid}"
-        self.redis_client.setex(key_official, self.call_session_ttl, json.dumps(session_data))
+            self.create_call_session(official_call_sid, customer_data, websocket_id)
 
-        # Remove old temporary entries
-        self.redis_client.delete(f"call_session:{temp_call_id}")
-        self.remove_temp_data(temp_call_id)
+            key = f"call_session:{official_call_sid}"
+            session_data = self.get_call_session(official_call_sid) or {}
+            session_data['conversation_history'] = conversation_history
+            session_data['status_history'] = status_history
+            self.redis_client.setex(key, self.call_session_ttl, json.dumps(session_data))
 
-        # Ensure the websocket session (if any) knows about the official CallSid
-        websocket_id = session_data.get('websocket_id')
-        if websocket_id:
-            self.link_call_to_websocket(websocket_id, official_call_sid)
+            self.redis_client.delete(f"call_session:{temp_call_id}")
+            self.remove_temp_data(temp_call_id)
 
-        print(f"✅ [Redis] Linked temp session {temp_call_id} to CallSid {official_call_sid}")
-        return True
-     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Event broadcasting helpers
     # ------------------------------------------------------------------
 
@@ -279,7 +252,6 @@ class RedisSessionManager:
             # Fallback logging via print keeps the dependency surface small for utils.
             print(f"❌ Redis publish_event failed on channel {target_channel}: {exc}")
             return False
-    
     
     # Notification System
     def notify_websocket(self, websocket_id: str, message: Dict[str, Any]):

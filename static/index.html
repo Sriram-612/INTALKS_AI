@@ -199,6 +199,7 @@
         .status-calling { background: #fff3cd; color: #856404; }
         .status-in-progress { background: #cce5ff; color: #004085; }
         .status-completed { background: #d1ecf1; color: #0c5460; }
+        .status-disconnected { background: #ffe8d6; color: #8c2f00; }
         .status-failed { background: #f8d7da; color: #721c24; }
         .status-agent-transfer { background: #e2e3e5; color: #383d41; }
 
@@ -1827,7 +1828,7 @@
         }
         
         function redirectToLogin() {
-            window.location.href = '/login';
+            window.location.href = '/auth/login';
         }
 
         async function initializeDashboard() {
@@ -3120,22 +3121,30 @@
 
         // Map call status for display
         function mapCallStatus(status) {
+            const normalized = (status || '').toLowerCase();
             const statusMap = {
                 'ready': 'ready',
                 'not_initiated': 'ready',
-                'calling': 'calling',
+                'not_initialized': 'ready',
                 'initiated': 'calling',
                 'ringing': 'calling',
+                'calling': 'calling',
+                'queued': 'calling',
+                'scheduled': 'ready',
                 'call_in_progress': 'in-progress',
                 'in_progress': 'in-progress',
+                'answered': 'in-progress',
                 'call_completed': 'completed',
                 'completed': 'completed',
-                'call_failed': 'failed',
+                'disconnected': 'disconnected',
+                'busy': 'disconnected',
+                'no_answer': 'disconnected',
+                'no-answer': 'disconnected',
                 'failed': 'failed',
-                'agent_transfer': 'agent-transfer',
-                'disconnected': 'failed'
+                'call_failed': 'failed',
+                'agent_transfer': 'agent-transfer'
             };
-            return statusMap[status] || 'ready';
+            return statusMap[normalized] || 'ready';
         }
 
         // Render customer table
@@ -3218,7 +3227,7 @@
                         <td>₹${formatCurrency(loan.due_amount || 0)}</td>
                         <td>
                             <span class="status-badge status-${callStatus}">
-                                ${callStatus.replace('-', ' ')}
+                                ${callStatus.replace(/[-_]/g, ' ').replace(/\b\w/g, char => char.toUpperCase())}
                             </span>
                         </td>
                         <td>
