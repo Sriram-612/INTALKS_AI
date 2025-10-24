@@ -2735,9 +2735,9 @@
                 logActivity(`✅ Loaded ${data.statuses.length} call status updates`);
                 
             } catch (error) {
+                // Silently log to console only - don't show error toast
                 console.error('Error loading call statuses:', error);
-                logActivity(`❌ Failed to load call statuses: ${error.message}`);
-                showToast(`Failed to load call statuses: ${error.message}`, 'error');
+                // Feature not yet implemented - suppress warning
             }
         }
 
