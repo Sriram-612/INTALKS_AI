@@ -72,6 +72,12 @@ class CognitoHostedUIAuth:
         # Use the correct hosted UI token endpoint
         token_url = f"{COGNITO_DOMAIN}/oauth2/token"
         
+        print(f"🔐 Exchanging code for tokens")
+        print(f"   Token URL: {token_url}")
+        print(f"   Client ID: {CLIENT_ID}")
+        print(f"   Redirect URI: {REDIRECT_URI}")
+        print(f"   Code: {code[:20]}...")
+        
         headers = {
             "Content-Type": "application/x-www-form-urlencoded"
         }
@@ -88,16 +94,24 @@ class CognitoHostedUIAuth:
             auth_string = f"{CLIENT_ID}:{CLIENT_SECRET}"
             auth_bytes = base64.b64encode(auth_string.encode()).decode()
             headers["Authorization"] = f"Basic {auth_bytes}"
+            print(f"   Using client secret authentication")
+        else:
+            print(f"   No client secret - using public client flow")
         
         async with httpx.AsyncClient() as client:
             response = await client.post(token_url, headers=headers, data=data)
             
+            print(f"   Response status: {response.status_code}")
+            
             if response.status_code == 200:
+                print(f"   ✅ Token exchange successful")
                 return response.json()
             else:
+                error_detail = response.text
+                print(f"   ❌ Token exchange failed: {error_detail}")
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Token exchange failed: {response.text}"
+                    detail=f"Token exchange failed: {error_detail}"
                 )
     
     async def get_jwks(self) -> Dict[str, Any]:

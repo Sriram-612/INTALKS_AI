@@ -9,18 +9,21 @@ EC2_HOST="ip-172-31-38-205"
 EC2_USER="ubuntu"
 EC2_PATH="~/voice_bot"
 
-# Upload the 4 fixed files
+# Upload the fixed files
 echo "📤 Uploading handler_asr.py..."
 scp voice-localenv/utils/handler_asr.py $EC2_USER@$EC2_HOST:$EC2_PATH/utils/handler_asr.py
 
 echo "📤 Uploading bedrock_client.py..."
 scp voice-localenv/utils/bedrock_client.py $EC2_USER@$EC2_HOST:$EC2_PATH/utils/bedrock_client.py
 
-echo "📤 Uploading call_management.py..."
-scp voice-localenv/services/call_management.py $EC2_USER@$EC2_HOST:$EC2_PATH/services/call_management.py
+echo "📤 Uploading call_management.py (file upload fix)..."
+scp services/call_management.py $EC2_USER@$EC2_HOST:$EC2_PATH/services/call_management.py
 
 echo "📤 Uploading main.py (bank name fix)..."
 scp main.py $EC2_USER@$EC2_HOST:$EC2_PATH/main.py
+
+echo "📤 Uploading debug helper (optional): debug_csv_upload.py"
+scp debug_csv_upload.py $EC2_USER@$EC2_HOST:$EC2_PATH/debug_csv_upload.py
 
 echo ""
 echo "✅ Files uploaded successfully!"

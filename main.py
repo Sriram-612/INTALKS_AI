@@ -30,7 +30,7 @@ from fastapi import (Body, FastAPI, File, HTTPException, Request, UploadFile,
                      WebSocket, Depends, Query)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse, 
-                              RedirectResponse, StreamingResponse)
+                              RedirectResponse, StreamingResponse, Response)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -1390,14 +1390,23 @@ def _loan_suffix(loan_id: Optional[str]) -> str:
     return digits[-4:] if len(digits) >= 4 else digits
 
 async def play_confirmation_prompt(websocket, customer_info: Dict[str, Any]) -> None:
+    """
+    Play initial greeting in customer's state-based language.
+    This will be followed by language detection and potential re-greeting.
+    """
     name = customer_info.get("name") or "there"
-    loan_suffix = _loan_suffix(customer_info.get("loan_id"))
-    prompt = (
-        f"Hello {name}. I am a voice agent calling from South India Finvest bank. "
-        f"Am I speaking with {name} with the loan ID ending in {loan_suffix}?"
-    )
-    logger.tts.info(f"🔁 Confirmation prompt: {prompt}")
-    audio_bytes = await sarvam_handler.synthesize_tts(prompt, "en-IN")
+    
+    # Get initial language based on customer's state
+    customer_state = customer_info.get("state", "")
+    initial_language = get_initial_language_from_state(customer_state)
+    
+    logger.tts.info(f"🌍 Customer state: {customer_state} → Initial language: {initial_language}")
+    
+    # Use the GREETING_TEMPLATE in the state-based language
+    greeting = GREETING_TEMPLATE.get(initial_language, GREETING_TEMPLATE["en-IN"]).format(name=name)
+    
+    logger.tts.info(f"🔁 Initial greeting in {initial_language}: {greeting}")
+    audio_bytes = await sarvam_handler.synthesize_tts(greeting, initial_language)
     await stream_audio_to_websocket(websocket, audio_bytes)
 
 async def play_connecting_prompt(websocket, language: str = "en-IN") -> None:
@@ -1440,52 +1449,118 @@ def _is_gurmukhi(text):
     return any('\u0A00' <= char <= '\u0A7F' for char in text)
 
 def detect_language(text):
-    text = text.strip().lower()
+    """
+    Enhanced language detection with priority for Indian languages.
+    Detects language based on keywords, Unicode characters, and romanized Indian words.
+    """
+    if not text:
+        return "en-IN"
     
-    # Enhanced English detection - check for common English words first
-    english_words = [
+    text = text.strip().lower()
+    original_text = text  # Keep original for case-sensitive checks
+    
+    # PRIORITY 1: Check for Devanagari/Unicode characters FIRST (most reliable)
+    if _is_devanagari(text):
+        return "hi-IN"
+    if _is_tamil(text):
+        return "ta-IN"
+    if _is_telugu(text):
+        return "te-IN"
+    if _is_kannada(text):
+        return "kn-IN"
+    if _is_malayalam(text):
+        return "ml-IN"
+    if _is_gujarati(text):
+        return "gu-IN"
+    if _is_bengali(text):
+        return "bn-IN"
+    if _is_punjabi(text):
+        return "pa-IN"
+    if _is_oriya(text):
+        return "or-IN"
+    
+    # PRIORITY 2: Check for romanized Hindi/Hinglish words (common in ASR output)
+    hindi_romanized_words = [
+        "ji", "haan", "han", "haa", "nahi", "nahin", "acha", "accha", "theek", "thik",
+        "bilkul", "zaroor", "kripya", "dhanyavaad", "shukriya", "namaste", "namaskar",
+        "kya", "kaise", "kab", "kahan", "kyun", "kaun", "kaunsa",
+        "main", "mein", "aap", "tum", "hum", "yeh", "woh", "koi",
+        "baat", "kar", "bol", "sun", "dekh", "samajh", "jaan",
+        "abhi", "phir", "baad", "pehle", "bad", "mein"
+    ]
+    
+    # Common Hindi phrases (romanized)
+    hindi_phrases = [
+        "ji haan", "haan ji", "ji han", "han ji", "theek hai", "thik hai",
+        "nahi ji", "ji nahi", "acha ji", "bilkul ji", "zaroor ji"
+    ]
+    
+    # Check for Hindi phrases first (higher priority)
+    for phrase in hindi_phrases:
+        if phrase in text:
+            logger.websocket.info(f"🔍 Detected Hindi phrase: '{phrase}' in '{text}'")
+            return "hi-IN"
+    
+    # Check for romanized Hindi words
+    words = text.split()
+    hindi_word_count = sum(1 for word in words if word in hindi_romanized_words)
+    
+    # If we have Hindi romanized words, it's likely Hindi
+    if hindi_word_count > 0:
+        logger.websocket.info(f"🔍 Detected {hindi_word_count} Hindi romanized words in '{text}'")
+        return "hi-IN"
+    
+    # PRIORITY 3: Check for Devanagari Unicode keywords (even if mixed with English)
+    hindi_unicode_keywords = ["नमस्ते", "हां", "नहीं", "हाँ", "जी", "अच्छा", "ठीक", "बिल्कुल", "जरूर"]
+    if any(word in original_text for word in hindi_unicode_keywords):
+        return "hi-IN"
+    
+    # Check for other Indian language Unicode keywords
+    if any(word in original_text for word in ["வணக்கம்", "ஆம்", "இல்லை", "சரி"]):
+        return "ta-IN"
+    if any(word in original_text for word in ["హాయ్", "అవును", "కాదు", "సరే"]):
+        return "te-IN"
+    if any(word in original_text for word in ["ಹೆಲೋ", "ಹೌದು", "ಇಲ್ಲ", "ಸರಿ"]):
+        return "kn-IN"
+    if any(word in original_text for word in ["നമസ്കാരം", "അതെ", "ഇല്ല", "ശരി"]):
+        return "ml-IN"
+    if any(word in original_text for word in ["નમસ્તે", "હા", "ના", "બરાબર"]):
+        return "gu-IN"
+    if any(word in original_text for word in ["नमस्कार", "होय", "नाही", "ठीक"]):
+        return "mr-IN"
+    if any(word in original_text for word in ["নমস্কার", "হ্যাঁ", "না", "ঠিক"]):
+        return "bn-IN"
+    if any(word in original_text for word in ["ਸਤ ਸ੍ਰੀ ਅਕਾਲ", "ਹਾਂ", "ਨਹੀਂ", "ਠੀਕ"]):
+        return "pa-IN"
+    if any(word in original_text for word in ["ନମସ୍କାର", "ହଁ", "ନା", "ଠିକ"]):
+        return "or-IN"
+    
+    # PRIORITY 4: Check for pure English (only if no Indian language indicators found)
+    pure_english_words = [
         "yes", "yeah", "yep", "sure", "okay", "ok", "alright", "right", 
         "no", "nah", "nope", "not", "never",
-        "hello", "hi", "hey", "good", "morning", "afternoon", "evening",
+        "hello", "good", "morning", "afternoon", "evening",
         "please", "thank", "thanks", "welcome", "sorry", "excuse",
         "what", "where", "when", "why", "how", "who", "which",
         "can", "could", "would", "should", "will", "shall", "may", "might",
-        "i", "me", "my", "you", "your", "we", "our", "they", "their",
         "speak", "talk", "call", "phone", "agent", "person", "someone",
         "help", "support", "assistance", "service", "transfer", "connect"
     ]
     
-    # Check if text contains primarily English words
-    words = text.split()
-    english_word_count = sum(1 for word in words if word in english_words)
+    # Count actual English words (excluding very short/ambiguous ones)
+    english_word_count = 0
+    for word in words:
+        # Exclude very short words that could be in any language
+        if len(word) >= 3 and word in pure_english_words:
+            english_word_count += 1
     
-    # If majority of words are English, return English
-    if words and english_word_count >= len(words) * 0.5:  # At least 50% English words
+    # Only return English if we have strong English indicators and NO Indian language words
+    if words and english_word_count >= len(words) * 0.7:  # At least 70% clear English words
+        logger.websocket.info(f"🔍 Detected English: {english_word_count}/{len(words)} words")
         return "en-IN"
     
-    # Check for specific language indicators
-    if any(word in text for word in ["नमस्ते", "हां", "नहीं", "हाँ", "जी", "अच्छा"]) or _is_devanagari(text): 
-        return "hi-IN"
-    if any(word in text for word in ["வணக்கம்", "ஆம்", "இல்லை"]) or _is_tamil(text): 
-        return "ta-IN"
-    if any(word in text for word in ["హాయ్", "అవును", "కాదు"]) or _is_telugu(text): 
-        return "te-IN"
-    if any(word in text for word in ["ಹೆಲೋ", "ಹೌದು", "ಇಲ್ಲ"]) or _is_kannada(text): 
-        return "kn-IN"
-    if any(word in text for word in ["നമസ്കാരം", "അതെ", "ഇല്ല"]) or _is_malayalam(text): 
-        return "ml-IN"
-    if any(word in text for word in ["નમસ્તે", "હા", "ના"]) or _is_gujarati(text): 
-        return "gu-IN"
-    if any(word in text for word in ["नमस्कार", "होय", "नाही"]) or _is_marathi(text): 
-        return "mr-IN"
-    if any(word in text for word in ["নমস্কার", "হ্যাঁ", "না"]) or _is_bengali(text): 
-        return "bn-IN"
-    if any(word in text for word in ["ਸਤ ਸ੍ਰੀ ਅਕਾਲ", "ਹਾਂ", "ਨਹੀਂ"]) or _is_punjabi(text): 
-        return "pa-IN"
-    if any(word in text for word in ["ନମସ୍କାର", "ହଁ", "ନା"]) or _is_oriya(text): 
-        return "or-IN"
-    
-    # Default to English if no specific language detected
+    # PRIORITY 5: Default to English if truly unclear
+    logger.websocket.info(f"🔍 Language unclear for '{text}', defaulting to English")
     return "en-IN"
 
 def detect_intent_with_claude(transcript: str, lang: str) -> str:
@@ -1676,23 +1751,29 @@ async def get_dashboard(request: Request):
     # Get Redis session
     session = get_session(request)
     
+    # Get session ID from cookie
+    session_id_cookie = request.cookies.get("session_id")
+    
     # Debug logging
     session_data = dict(session.data)
     user_data = session.get("user")
     is_auth = user_data is not None
     
-    logger.info(f"Dashboard access attempt - Session data: {session_data}")
-    logger.info(f"Dashboard access attempt - User data: {user_data}")
-    logger.info(f"Dashboard access attempt - Is authenticated: {is_auth}")
+    logger.info(f"📊 Dashboard access attempt")
+    logger.info(f"   Session ID from cookie: {session_id_cookie}")
+    logger.info(f"   Session object ID: {session.session_id}")
+    logger.info(f"   Session data keys: {list(session_data.keys())}")
+    logger.info(f"   User data exists: {user_data is not None}")
+    logger.info(f"   Is authenticated: {is_auth}")
     
     # Check if user is authenticated
     if not is_auth:
-        logger.info("User not authenticated, redirecting to Cognito login")
+        logger.info("❌ User not authenticated, redirecting to Cognito login")
         # Redirect to Cognito hosted UI login
         login_url = cognito_auth.get_login_url()
         return RedirectResponse(url=login_url, status_code=302)
     
-    logger.info("User authenticated, serving dashboard")
+    logger.info(f"✅ User authenticated: {user_data.get('email', 'unknown')}, serving dashboard")
     # User is authenticated, redirect to the static dashboard
     return RedirectResponse(url="/static/index.html", status_code=302)
 
@@ -1801,27 +1882,51 @@ async def api_logout(request: Request):
     return response
 
 @app.get("/auth/callback")
-async def auth_callback(request: Request, code: str = Query(...), state: str = Query(default="default")):
+async def auth_callback(request: Request, response: Response, code: str = Query(...), state: str = Query(default="default")):
     """Handle Cognito authentication callback"""
     try:
+        logger.info(f"🔐 Auth callback received - code: {code[:20]}...")
+        
         # Exchange authorization code for tokens
         token_data = await cognito_auth.exchange_code_for_tokens(code)
+        logger.info("✅ Token exchange successful")
         
         # Get user info from access token
         user_info = await cognito_auth.get_user_info_from_access_token(token_data["access_token"])
+        logger.info(f"✅ User info retrieved: {user_info.get('email', 'unknown')}")
         
         # Store user info in Redis session
         session = get_session(request)
         session["user"] = user_info
         session["tokens"] = token_data
+        session["authenticated_at"] = datetime.now(IST).isoformat()
         
-        logger.info(f"User authenticated successfully: {user_info.get('email', 'unknown')}")
+        logger.info(f"✅ Session saved - Session ID: {session.session_id}")
+        logger.info(f"✅ Session data keys: {list(session.data.keys())}")
         
-        # Redirect to dashboard
-        return RedirectResponse(url="/", status_code=302)
+        # Create redirect response
+        redirect_response = RedirectResponse(url="/", status_code=302)
+        
+        # Explicitly set session cookie with correct settings for ngrok
+        redirect_response.set_cookie(
+            key="session_id",
+            value=session.session_id,
+            max_age=7200,  # 2 hours
+            httponly=True,
+            secure=True,  # Required for ngrok HTTPS
+            samesite="none",  # Required for cross-site cookies
+            path="/"
+        )
+        
+        logger.info(f"✅ User authenticated successfully: {user_info.get('email', 'unknown')}")
+        logger.info(f"✅ Redirecting to dashboard with session cookie")
+        
+        return redirect_response
         
     except Exception as e:
-        logger.error(f"Authentication callback error: {e}")
+        logger.error(f"❌ Authentication callback error: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=f"Authentication failed: {str(e)}")
 
 @app.get("/auth/user")
@@ -2347,7 +2452,12 @@ async def run_voice_session(
         if customer_info.get('due_date') is not None:
             customer_info['due_date'] = str(customer_info['due_date'])
 
-        current_language = customer_info['lang']
+        # Set initial language based on customer's state
+        initial_language = get_initial_language_from_state(customer_info.get('state', ''))
+        current_language = initial_language
+        customer_info['initial_language'] = initial_language
+        
+        logger.websocket.info(f"🌍 Setting initial language to {initial_language} based on state: {customer_info.get('state')}")
         
         # Initialize transcript logger with customer info
         try:
@@ -2372,6 +2482,37 @@ async def run_voice_session(
     async def handle_confirmation_response(transcript: str) -> Optional[str]:
         nonlocal conversation_stage, confirmation_attempts, claude_chat, current_language
 
+        # IMPORTANT: Detect language FIRST before checking affirmative/negative
+        # This ensures we check if customer is responding in correct language
+        detected_language = detect_language(transcript)
+        initial_language = customer_info.get('initial_language', 'en-IN')
+        
+        logger.websocket.info(f"🌐 Language detection - Initial: {initial_language}, Detected: {detected_language}, Transcript: {transcript}")
+        
+        # Check if customer responded in a different language than initial greeting
+        # This must happen BEFORE affirmative/negative check to catch language mismatches
+        if detected_language and detected_language != initial_language and detected_language != current_language:
+            logger.websocket.info(f"🔄 Customer responded in different language: {initial_language} → {detected_language}")
+            logger.websocket.info(f"♻️ Re-greeting customer in detected language: {detected_language}")
+            
+            # Update current language
+            current_language = detected_language
+            customer_info['lang'] = detected_language
+            
+            # Re-play greeting in detected language
+            name = customer_info.get("name") or "there"
+            re_greeting = GREETING_TEMPLATE.get(detected_language, GREETING_TEMPLATE["en-IN"]).format(name=name)
+            
+            logger.tts.info(f"🔁 Re-greeting in {detected_language}: {re_greeting}")
+            await speak_text(re_greeting, detected_language)
+            
+            # Reset confirmation attempts for the new language
+            confirmation_attempts = 0
+            
+            # Stay in WAITING_CONFIRMATION stage to get response in correct language
+            return "language_switched"
+
+        # NOW check for affirmative/negative responses (after language detection)
         normalized = transcript.lower()
         affirmative = {"yes", "yeah", "yep", "haan", "ha", "correct", "sure", "yup"}
         negative = {"no", "nah", "nope", "nahi", "na"}
@@ -2599,12 +2740,16 @@ async def run_voice_session(
                 continue
 
             logger.websocket.info(f"📝 Transcript ({conversation_stage}): {transcript}")
-            detected_lang = detect_language(transcript)
-            if detected_lang and detected_lang != current_language:
-                logger.websocket.info(
-                    f"🌐 Switching customer language {current_language} → {detected_lang}"
-                )
-                current_language = detected_lang
+            
+            # IMPORTANT: Don't do global language switch during WAITING_CONFIRMATION
+            # Let handle_confirmation_response() handle language detection and re-greeting
+            if conversation_stage != "WAITING_CONFIRMATION":
+                detected_lang = detect_language(transcript)
+                if detected_lang and detected_lang != current_language:
+                    logger.websocket.info(
+                        f"🌐 Switching customer language {current_language} → {detected_lang}"
+                    )
+                    current_language = detected_lang
 
             if conversation_stage == "WAITING_CONFIRMATION":
                 result = await handle_confirmation_response(transcript)

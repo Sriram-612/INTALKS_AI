@@ -4,6 +4,12 @@ Debug CSV Upload Processing
 Test the CSV upload functionality with your data structure
 """
 
+#!/usr/bin/env python3
+"""
+Debug CSV Upload Processing
+Test the CSV upload functionality with your data structure
+"""
+
 import pandas as pd
 import io
 from services.call_management import call_service
@@ -12,6 +18,7 @@ from services.call_management import call_service
 csv_content = """Name,Phone,Loan ID,Amount,Due Date,State,Cluster,Branch,Branch Contact,Employee,Employee ID,Employee Contact,Last Paid Date,Last Paid Amount,Due Amount
 Test Customer,9876543210,TEST001,50000,2025-10-15,Maharashtra,Cluster A,Mumbai Branch,+912233445566,John Doe,EMP001,+919876543211,2025-09-01,10000,40000
 """
+
 
 async def test_csv_processing():
     """Test CSV processing with sample data"""
@@ -30,8 +37,10 @@ async def test_csv_processing():
         
         print("✅ CSV Processing Result:")
         print(f"   Success: {result.get('success', False)}")
-        print(f"   Processed: {result.get('processed_count', 0)} customers")
-        print(f"   Failed: {result.get('failed_count', 0)} customers")
+        processing = result.get('processing_results', {})
+        print(f"   Total: {processing.get('total_records', 0)}")
+        print(f"   Processed: {processing.get('processed_records', 0)}")
+        print(f"   Failed: {processing.get('failed_records', 0)}")
         
         if result.get('customers'):
             customer = result['customers'][0]
@@ -43,6 +52,7 @@ async def test_csv_processing():
         print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     import asyncio

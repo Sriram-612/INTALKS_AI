@@ -69,32 +69,56 @@ class CallManagementService:
         session = self.db_manager.get_session()
         try:
             logger.info(f"Starting customer file upload: {filename}")
-            
+
             # Create file upload record using new schema structure
-            file_upload = FileUpload(
-                filename=filename,
-                uploaded_by='system',
-                status='processing',
-                total_records=0
-            )
-            session.add(file_upload)
-            session.commit()
-            session.refresh(file_upload)
-            
-            logger.database.info(f"Created file upload record with ID: {file_upload.id}")
-            
+            try:
+                file_upload = FileUpload(
+                    filename=filename,
+                    original_filename=filename,
+                    uploaded_by=uploaded_by or 'system',
+                    status='processing',
+                    total_records=0
+                )
+                session.add(file_upload)
+                session.commit()
+                session.refresh(file_upload)
+                logger.database.info(f"Created file upload record with ID: {file_upload.id}")
+            except Exception as e:
+                # If we fail to create a FileUpload record, abort early with clear error
+                logger.error(f"Failed to create FileUpload record: {e}", exc_info=True)
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+                return {'success': False, 'error': f'failed_to_create_file_upload: {str(e)}'}
+
             # Parse the file (assuming CSV/Excel)
-            customers_data = await self._parse_customer_file(file_data, filename)
-            file_upload.total_records = len(customers_data)
-            
+            try:
+                customers_data = await self._parse_customer_file(file_data, filename)
+                file_upload.total_records = len(customers_data)
+                session.commit()
+            except Exception as e:
+                logger.error(f"Failed to parse uploaded file {filename}: {e}", exc_info=True)
+                # mark upload as failed and persist
+                try:
+                    file_upload.status = 'failed'
+                    file_upload.processing_errors = [{'error': str(e)}]
+                    session.commit()
+                except Exception:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+                return {'success': False, 'error': f'failed_to_parse_file: {str(e)}'}
+
             logger.info(f"Parsed {len(customers_data)} customer records from {filename}")
-            
+
             processed_customers = []
             failed_records = 0
             processing_errors = []
             # Store upload date in IST 
             current_upload_date = datetime.now().date()
-            
+
             for idx, customer_data in enumerate(customers_data):
                 try:
                     phone_number = customer_data.get('phone_number')
@@ -229,32 +253,44 @@ class CallManagementService:
                         'error': str(e)
                     })
                     logger.error(f"Failed to process customer at row {idx + 1}: {e}", exc_info=True)
-            
             # Update file upload record
-            file_upload.processed_records = len(processed_customers)
-            file_upload.success_records = len(processed_customers)
-            file_upload.failed_records = failed_records
-            file_upload.processing_errors = processing_errors
-            file_upload.status = 'completed' if failed_records == 0 else 'partial_failure'
-            session.commit()
-            
+            try:
+                file_upload.processed_records = len(processed_customers)
+                file_upload.success_records = len(processed_customers)
+                file_upload.failed_records = failed_records
+                file_upload.processing_errors = processing_errors or None
+                file_upload.status = 'completed' if failed_records == 0 else 'partial_failure'
+                session.commit()
+            except Exception as e:
+                logger.error(f"Failed to update FileUpload record: {e}", exc_info=True)
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+
             logger.info(f"File processing completed: {len(processed_customers)} successful, {failed_records} failed")
-            
+
             # Store in Redis for quick access
-            temp_key = f"uploaded_customers_{file_upload.id}"
-            self.redis_manager.store_temp_data(temp_key, processed_customers, ttl=3600)
-            
+            try:
+                temp_key = f"uploaded_customers_{file_upload.id}"
+                self.redis_manager.store_temp_data(temp_key, processed_customers, ttl=3600)
+            except Exception as e:
+                logger.warning(f"Failed to store upload results in Redis: {e}")
+
             # Notify WebSocket if connected
-            if websocket_id:
-                self.redis_manager.notify_websocket(websocket_id, {
-                    'type': 'file_processed',
-                    'upload_id': str(file_upload.id),
-                    'total_records': file_upload.total_records,
-                    'processed_records': file_upload.processed_records,
-                    'failed_records': failed_records,
-                    'customers': processed_customers
-                })
-            
+            try:
+                if websocket_id:
+                    self.redis_manager.notify_websocket(websocket_id, {
+                        'type': 'file_processed',
+                        'upload_id': str(file_upload.id),
+                        'total_records': file_upload.total_records,
+                        'processed_records': file_upload.processed_records,
+                        'failed_records': failed_records,
+                        'customers': processed_customers
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to notify websocket about upload: {e}")
+
             return {
                 'success': True,
                 'upload_id': str(file_upload.id),
@@ -262,20 +298,25 @@ class CallManagementService:
                     'total_records': file_upload.total_records,
                     'processed_records': file_upload.processed_records,
                     'success_records': file_upload.success_records,
-                    'failed_records': failed_records,
+                    'failed_records': file_upload.failed_records,
                     'upload_date': current_upload_date.isoformat()
                 },
                 'customers': processed_customers,
                 'temp_key': temp_key
             }
-            
         except Exception as e:
-            logger.error(f"Error processing customer file upload: {e}", exc_info=True)
-            if 'file_upload' in locals():
-                file_upload.status = 'failed'
-                file_upload.processing_errors = [{'error': str(e)}]
-                session.commit()
-            
+            logger.error(f"Unexpected error processing customer file upload: {e}", exc_info=True)
+            try:
+                if 'file_upload' in locals():
+                    file_upload.status = 'failed'
+                    file_upload.processing_errors = [{'error': str(e)}]
+                    session.commit()
+            except Exception:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+
             return {
                 'success': False,
                 'error': str(e)

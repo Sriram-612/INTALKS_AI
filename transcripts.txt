@@ -118,3 +118,41 @@
 2025-10-20T18:40:31.173397 | जी हां।
 2025-10-20T18:40:33.374648 | [Claude_raw] धन्यवाद कुशल जी। आप आज ₹200 और बाकी राशि 10 नवंबर तक जमा करेंगे। [promise]
 2025-10-20T18:40:33.378981 | [Claude] धन्यवाद कुशल जी। आप आज ₹200 और बाकी राशि 10 नवंबर तक जमा करेंगे।
+
+=== Call 293dcfe1602fe03d9f035623d17c19ao | Started 2025-10-23T23:20:24.697856 | Customer: Kushal Sharma | Phone: +917417119014 ===
+2025-10-23T23:20:24.700455 | Yes.
+2025-10-23T23:20:31.963993 | [Claude] Hello Mr. Sharma, this is Priya from South India Finvest Bank calling about your overdue EMI of ₹1,500 for loan LN747. When can you make this payment?
+
+=== Call 93253521f4d449963515b1489d8f19ao | Started 2025-10-23T23:21:11.899580 | Customer: Kushal Sharma | Phone: +917417119014 ===
+2025-10-23T23:21:11.899829 | Yes.
+2025-10-23T23:21:18.914591 | [Claude] Hello Mr. Sharma, this is Priya from South India Finvest Bank calling about your overdue EMI of ₹1,500 for loan LN747. When can you make the payment?
+
+=== Call 98a0a91f9bf6ec9c97afd709ff4d19ao | Started 2025-10-23T23:21:51.774274 | Customer: Kushal Sharma | Phone: +917417119014 ===
+2025-10-23T23:21:51.774541 | Yes.
+2025-10-23T23:21:58.782203 | [Claude] Hello Mr. Sharma, this is Priya from South India Finvest Bank calling about your overdue EMI of ₹1,500 for loan LN747. When can you make this payment?
+2025-10-23T23:22:16.597437 | जी हां
+2025-10-23T23:22:18.397417 | [Claude_raw] आप कब तक भुगतान कर पाएंगे? क्या आज या कल तक पेमेंट हो सकता है? [continue]
+2025-10-23T23:22:18.398660 | [Claude] आप कब तक भुगतान कर पाएंगे? क्या आज या कल तक पेमेंट हो सकता है?
+
+=== Call 1eeac2464c2cd819b6d287635b2519ao | Started 2025-10-23T23:34:35.331981 | Customer: Kushal Sharma | Phone: +917417119014 ===
+2025-10-23T23:34:35.332522 | Yes.
+2025-10-23T23:34:42.950588 | [Claude] Hello Mr. Sharma, this is Priya from South India Finvest Bank calling about your overdue EMI of ₹1,500 for loan LN747. When can you make this payment?
+2025-10-23T23:35:01.076379 | जी हां
+2025-10-23T23:35:03.258952 | [Claude_raw] आपका EMI बकाया है, क्या आप बता सकते हैं कि आप कब तक पेमेंट कर पाएंगे? मुझे एक तारीख बताइए। [continue]
+2025-10-23T23:35:03.261062 | [Claude] आपका EMI बकाया है, क्या आप बता सकते हैं कि आप कब तक पेमेंट कर पाएंगे? मुझे एक तारीख बताइए।
+2025-10-23T23:35:15.456111 | बताऊँ।
+2025-10-23T23:35:17.119032 | [Claude_raw] धन्यवाद। कृपया बताइए कि आप किस तारीख तक ₹1,500 का भुगतान कर देंगे? [continue]
+2025-10-23T23:35:17.120537 | [Claude] धन्यवाद। कृपया बताइए कि आप किस तारीख तक ₹1,500 का भुगतान कर देंगे?
+
+=== Call d3feca0c6273742c4ed9026b876b19ao | Started 2025-10-23T23:47:27.659825 | Customer: Kushal Sharma | Phone: +917417119014 ===
+2025-10-23T23:47:27.660105 | Yes.
+2025-10-23T23:47:35.070078 | [Claude] Hello Mr. Sharma, this is Priya from South India Finvest Bank calling about your overdue EMI of ₹1,500 on loan LN747. When can you make this payment?
+2025-10-23T23:47:53.187331 | जी हां कर सकता हूं।
+2025-10-23T23:47:54.824375 | [Claude_raw] अच्छा, आप कब तक पेमेंट कर पाएंगे? क्या आज या कल तक हो पाएगा? [continue]
+2025-10-23T23:47:54.825949 | [Claude] अच्छा, आप कब तक पेमेंट कर पाएंगे? क्या आज या कल तक हो पाएगा?
+2025-10-23T23:48:04.486908 | कल तक करने का।
+2025-10-23T23:48:06.592953 | [Claude_raw] बहुत अच्छा, तो आप कल तक ₹1,500 का पेमेंट कर देंगे। क्या आप इसकी पुष्टि कर सकते हैं? [continue]
+2025-10-23T23:48:06.593906 | [Claude] बहुत अच्छा, तो आप कल तक ₹1,500 का पेमेंट कर देंगे। क्या आप इसकी पुष्टि कर सकते हैं?
+2025-10-23T23:48:19.656853 | ठीक है।
+2025-10-23T23:48:21.860471 | [Claude_raw] धन्यवाद श्री शर्मा, आपका कल तक पेमेंट करने का वादा नोट कर लिया है। अगर कोई समस्या हो तो हमें तुरंत बताएं। [promise]
+2025-10-23T23:48:21.862132 | [Claude] धन्यवाद श्री शर्मा, आपका कल तक पेमेंट करने का वादा नोट कर लिया है। अगर कोई समस्या हो तो हमें तुरंत बताएं।
