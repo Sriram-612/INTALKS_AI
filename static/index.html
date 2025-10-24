@@ -196,13 +196,12 @@
         }
 
         .status-ready { background: #d4edda; color: #155724; }
-        .status-not_initiated { background: #e9ecef; color: #495057; }
         .status-calling { background: #fff3cd; color: #856404; }
-        .status-call_in_progress { background: #cce5ff; color: #004085; }
-        .status-call_completed { background: #d1ecf1; color: #0c5460; }
+        .status-in-progress { background: #cce5ff; color: #004085; }
+        .status-completed { background: #d1ecf1; color: #0c5460; }
         .status-disconnected { background: #ffe8d6; color: #8c2f00; }
         .status-failed { background: #f8d7da; color: #721c24; }
-        .status-agent_transfer { background: #e2e3e5; color: #383d41; }
+        .status-agent-transfer { background: #e2e3e5; color: #383d41; }
 
         /* Upload Date Badge */
         .upload-date-badge {
@@ -378,6 +377,105 @@
         .connection-status.connecting {
             background: #fff3cd;
             color: #856404;
+        }
+
+        /* Session Management Styles */
+        .user-session-info {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            color: #333;
+            padding: 10px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 500;
+            z-index: 1000;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border: 1px solid #e3e8ee;
+        }
+
+        .logout-button {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 0.85em;
+            font-weight: 500;
+            margin-left: 10px;
+            transition: all 0.3s ease;
+        }
+
+        .logout-button:hover {
+            background: #c82333;
+            transform: translateY(-1px);
+        }
+
+        .session-timer {
+            color: #666;
+            font-size: 0.8em;
+            margin-left: 8px;
+        }
+
+        .session-timer.warning {
+            color: #ffc107;
+            font-weight: 600;
+        }
+
+        .session-timer.critical {
+            color: #dc3545;
+            font-weight: 600;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+
+        .session-expired-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+        }
+
+        .session-expired-modal {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            text-align: center;
+            max-width: 400px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        .session-expired-modal h3 {
+            color: #dc3545;
+            margin-bottom: 15px;
+        }
+
+        .session-expired-modal p {
+            margin-bottom: 20px;
+            color: #666;
+        }
+
+        .session-expired-modal button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
         }
 
         /* Customer Details Modal */
@@ -808,12 +906,11 @@
             text-transform: uppercase;
         }
 
-        .status-not_initiated { background: #e9ecef; color: #495057; }
+        .status-initiated { background: #e3f2fd; color: #1976d2; }
         .status-call_in_progress { background: #fff3e0; color: #f57c00; }
         .status-call_completed { background: #e8f5e8; color: #2e7d32; }
-        .status-calling { background: #fff3cd; color: #856404; }
-        .status-disconnected { background: #ffe8d6; color: #8c2f00; }
-        .status-failed { background: #f8d7da; color: #721c24; }
+        .status-call_failed { background: #ffebee; color: #c62828; }
+        .status-ringing { background: #f3e5f5; color: #7b1fa2; }
 
         /* Call Details Modal Styles */
         .call-info {
@@ -1059,6 +1156,22 @@
 
     <div class="connection-status" id="connectionStatus">Connecting...</div>
 
+    <!-- User Session Info -->
+    <div class="user-session-info" id="userSessionInfo" style="display: none;">
+        <span id="userDisplayName">User</span>
+        <span class="session-timer" id="sessionTimer">2:00:00</span>
+        <button class="logout-button" onclick="handleLogout()">Logout</button>
+    </div>
+
+    <!-- Session Expired Modal -->
+    <div class="session-expired-overlay" id="sessionExpiredOverlay" style="display: none;">
+        <div class="session-expired-modal">
+            <h3>🕒 Session Expired</h3>
+            <p>Your session has expired for security reasons. Please log in again to continue.</p>
+            <button onclick="redirectToLogin()">Login Again</button>
+        </div>
+    </div>
+
     <div class="container">
         <!-- Statistics Overview -->
         <div class="statistics-grid">
@@ -1200,11 +1313,11 @@
                             <div class="call-stat-label">In Progress</div>
                         </div>
                         <div class="call-stat-card">
-                            <div class="call-stat-number" id="callStatusCompletedStat">0</div>
+                            <div class="call-stat-number" id="completedCallsStat">0</div>
                             <div class="call-stat-label">Completed</div>
                         </div>
                         <div class="call-stat-card">
-                            <div class="call-stat-number" id="callStatusFailedStat">0</div>
+                            <div class="call-stat-number" id="failedCallsStat">0</div>
                             <div class="call-stat-label">Failed</div>
                         </div>
                     </div>
@@ -1472,13 +1585,18 @@
     </div>
 
     <script>
-        // Global variables
-        let customers = [];
-        let filteredCustomers = [];
-        let displayedCustomers = [];
-        let selectedCustomers = new Set();
-        
-        // Batch upload pagination variables
+    // Global variables
+    let customers = [];
+    let filteredCustomers = [];
+    let displayedCustomers = [];
+    let selectedCustomers = new Set();
+
+    // Session management variables
+    let sessionData = null;
+    let sessionCheckInterval = null;
+    let sessionWarningShown = false;
+
+    // Batch upload pagination variables
         let batchCurrentPage = 1;
         let batchPageSize = 25;  // Default to 25 per page
         let batchDateFilter = 'today';
@@ -1490,17 +1608,228 @@
         let isInitialLoad = true;
 
         // Auto-refresh settings
-        const AUTO_REFRESH_INTERVAL = 1000; // 1 second for status refresh
+        const AUTO_REFRESH_INTERVAL = 30000; // 30 seconds
         const DATA_REFRESH_INTERVAL = 60000;  // 1 minute for full data refresh
+
+        // Simple IST date formatting functions
+        function formatDateIST(dateString, options = {}) {
+            if (!dateString) return 'N/A';
+            
+            try {
+                const date = new Date(dateString);
+                
+                const defaultOptions = {
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    ...options
+                };
+                
+                return date.toLocaleString('en-IN', defaultOptions) + ' IST';
+            } catch (error) {
+                console.warn('Error formatting date:', error);
+                return dateString;
+            }
+        }
+
+        function formatTimeIST(dateString) {
+            return formatDateIST(dateString, {
+                year: undefined,
+                month: undefined,
+                day: undefined
+            }).replace(' IST', '') + ' IST';
+        }
+
+        function formatDateOnlyIST(dateString) {
+            if (!dateString) return 'N/A';
+            try {
+                const date = new Date(dateString);
+                return date.toLocaleDateString('en-IN');
+            } catch (error) {
+                return dateString;
+            }
+        }
 
         // Initialize dashboard
         document.addEventListener('DOMContentLoaded', function() {
             console.log('🚀 Dashboard initializing...');
             showGlobalLoading('Initializing Dashboard...', 'Setting up connection and loading data...');
             
-            // Initialize in sequence for better user experience
+            // Initialize session management first
+            initializeSessionManagement();
+            // Initialize dashboard after session management
             initializeDashboard();
         });
+
+        // === SESSION MANAGEMENT FUNCTIONS ===
+        
+        async function initializeSessionManagement() {
+            console.log('🔐 Initializing session management...');
+            
+            try {
+                // Check initial session status
+                await checkSessionStatus();
+                
+                // Start session monitoring
+                startSessionMonitoring();
+                
+                console.log('✅ Session management initialized');
+            } catch (error) {
+                console.error('❌ Session management initialization failed:', error);
+            }
+        }
+        
+        async function checkSessionStatus() {
+            try {
+                const response = await fetch('/auth/session-status');
+                const data = await response.json();
+                
+                if (data.authenticated) {
+                    sessionData = data;
+                    updateSessionDisplay(data);
+                } else {
+                    handleSessionExpired();
+                }
+                
+                return data;
+            } catch (error) {
+                console.error('Error checking session status:', error);
+                return { authenticated: false, expired: true };
+            }
+        }
+        
+        function updateSessionDisplay(data) {
+            const userSessionInfo = document.getElementById('userSessionInfo');
+            const userDisplayName = document.getElementById('userDisplayName');
+            const sessionTimer = document.getElementById('sessionTimer');
+            
+            if (data.authenticated && data.user) {
+                userDisplayName.textContent = data.user.name || data.user.email;
+                updateSessionTimer(data.remaining_time);
+                userSessionInfo.style.display = 'block';
+            } else {
+                userSessionInfo.style.display = 'none';
+            }
+        }
+        
+        function updateSessionTimer(remainingSeconds) {
+            const sessionTimer = document.getElementById('sessionTimer');
+            
+            if (remainingSeconds <= 0) {
+                sessionTimer.textContent = 'Expired';
+                sessionTimer.className = 'session-timer critical';
+                handleSessionExpired();
+                return;
+            }
+            
+            const hours = Math.floor(remainingSeconds / 3600);
+            const minutes = Math.floor((remainingSeconds % 3600) / 60);
+            const seconds = remainingSeconds % 60;
+            
+            const timeString = `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            sessionTimer.textContent = timeString;
+            
+            // Change color based on remaining time
+            if (remainingSeconds <= 300) { // 5 minutes
+                sessionTimer.className = 'session-timer critical';
+                if (!sessionWarningShown) {
+                    showSessionWarning(remainingSeconds);
+                    sessionWarningShown = true;
+                }
+            } else if (remainingSeconds <= 600) { // 10 minutes
+                sessionTimer.className = 'session-timer warning';
+            } else {
+                sessionTimer.className = 'session-timer';
+            }
+        }
+        
+        function startSessionMonitoring() {
+            // Check session status every 30 seconds
+            sessionCheckInterval = setInterval(async () => {
+                const status = await checkSessionStatus();
+                if (!status.authenticated) {
+                    stopSessionMonitoring();
+                    handleSessionExpired();
+                }
+            }, 30000);
+            
+            // Update timer every second
+            setInterval(() => {
+                if (sessionData && sessionData.remaining_time > 0) {
+                    sessionData.remaining_time--;
+                    updateSessionTimer(sessionData.remaining_time);
+                }
+            }, 1000);
+        }
+        
+        function stopSessionMonitoring() {
+            if (sessionCheckInterval) {
+                clearInterval(sessionCheckInterval);
+                sessionCheckInterval = null;
+            }
+        }
+        
+        function showSessionWarning(remainingSeconds) {
+            const minutes = Math.ceil(remainingSeconds / 60);
+            showToast(`⚠️ Session expires in ${minutes} minute${minutes > 1 ? 's' : ''}! Please save your work.`, 'warning', 10000);
+        }
+        
+        function handleSessionExpired() {
+            console.log('🕒 Session expired - showing modal');
+            
+            // Stop monitoring
+            stopSessionMonitoring();
+            
+            // Show expired modal
+            document.getElementById('sessionExpiredOverlay').style.display = 'flex';
+            
+            // Hide session info
+            document.getElementById('userSessionInfo').style.display = 'none';
+        }
+        
+        async function handleLogout() {
+            if (!confirm('Are you sure you want to logout?')) {
+                return;
+            }
+            
+            console.log('🚪 Logout initiated by user');
+            
+            try {
+                // Show loading
+                showGlobalLoading('Logging out...', 'Please wait while we securely log you out');
+                
+                // Call logout API
+                const response = await fetch('/api/logout', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Stop session monitoring
+                    stopSessionMonitoring();
+                    
+                    // Redirect to Cognito logout
+                    window.location.href = data.logout_url;
+                } else {
+                    throw new Error(data.message || 'Logout failed');
+                }
+            } catch (error) {
+                console.error('Logout error:', error);
+                hideGlobalLoading();
+                showToast('❌ Logout failed. Please try again.', 'error');
+            }
+        }
+        
+        function redirectToLogin() {
+            window.location.href = '/auth/login';
+        }
 
         async function initializeDashboard() {
             try {
@@ -1839,11 +2168,26 @@
                     throw new Error('Invalid response format: expected array of customers');
                 }
                 
-                customers = responseData.map(c => ({
-                    ...c,
-                    status: (c.status || c.call_status || 'ready').toLowerCase(),
-                    call_status: (c.call_status || c.status || 'ready').toLowerCase()
+                // Normalize customer data - ensure each customer has a loans array
+                customers = responseData.map(customer => ({
+                    ...customer,
+                    loans: Array.isArray(customer.loans) ? customer.loans : []
                 }));
+                
+                // Debug upload date fields for first few customers
+                if (customers.length > 0) {
+                    console.log('🗂️ Upload date field analysis:');
+                    customers.slice(0, 3).forEach((customer, index) => {
+                        console.log(`Customer ${index + 1}:`, {
+                            id: customer.id,
+                            name: customer.full_name || customer.name || 'Unknown',
+                            first_uploaded_at: customer.first_uploaded_at,
+                            created_at: customer.created_at,
+                            updated_at: customer.updated_at
+                        });
+                    });
+                }
+                
                 filteredCustomers = [...customers];
                 
                 // Clear any existing selections since data has been refreshed
@@ -1977,12 +2321,87 @@
                 const responseData = await response.json();
                 console.log('📊 Batch details data:', responseData);
                 
-                if (!responseData.success) {
-                    throw new Error(responseData.error || 'Failed to load batch data');
-                }
+                // Handle simple array response format from API
+                let batches = [];
+                let pagination = {};
                 
-                const batches = responseData.uploads || [];
-                const pagination = responseData.pagination || {};
+                if (Array.isArray(responseData)) {
+                    // Direct array response - apply client-side pagination
+                    const allBatches = responseData;
+                    
+                    // Apply date filter with IST timezone support
+                    let filteredBatches = allBatches;
+                    if (batchDateFilter && batchDateFilter !== 'all') {
+                        // Get current IST date for comparison
+                        const nowIST = new Date().toLocaleString('en-US', {timeZone: 'Asia/Kolkata'});
+                        const today = new Date(nowIST);
+                        const todayStr = today.toDateString();
+                        const yesterdayStr = new Date(today.getTime() - 86400000).toDateString();
+                        
+                        console.log('📊 Date filter debug:', {
+                            filter: batchDateFilter,
+                            todayIST: todayStr,
+                            yesterdayIST: yesterdayStr
+                        });
+                        
+                        filteredBatches = allBatches.filter(batch => {
+                            // Convert batch date to IST for comparison
+                            const batchDateUTC = new Date(batch.uploaded_at);
+                            const batchDateIST = new Date(batchDateUTC.toLocaleString('en-US', {timeZone: 'Asia/Kolkata'}));
+                            const batchDateStr = batchDateIST.toDateString();
+                            
+                            console.log('📊 Batch date comparison:', {
+                                filename: batch.filename,
+                                originalDate: batch.uploaded_at,
+                                batchDateIST: batchDateStr,
+                                todayIST: todayStr,
+                                matches: batchDateStr === todayStr
+                            });
+                            
+                            switch (batchDateFilter) {
+                                case 'today': return batchDateStr === todayStr;
+                                case 'yesterday': return batchDateStr === yesterdayStr;
+                                case 'week': 
+                                    const weekAgo = new Date(today.getTime() - 7 * 86400000);
+                                    return batchDateIST >= weekAgo;
+                                case 'month':
+                                    const monthAgo = new Date(today.getTime() - 30 * 86400000);
+                                    return batchDateIST >= monthAgo;
+                                default: return true;
+                            }
+                        });
+                        
+                        console.log('📊 Filtered batches:', {
+                            total: allBatches.length,
+                            filtered: filteredBatches.length,
+                            filter: batchDateFilter
+                        });
+                    }
+                    
+                    // Apply pagination
+                    const totalCount = filteredBatches.length;
+                    const pageSize = batchPageSize === 'all' ? totalCount : parseInt(batchPageSize);
+                    const totalPages = Math.ceil(totalCount / pageSize);
+                    const startIndex = (batchCurrentPage - 1) * pageSize;
+                    const endIndex = startIndex + pageSize;
+                    
+                    batches = filteredBatches.slice(startIndex, endIndex);
+                    pagination = {
+                        current_page: batchCurrentPage,
+                        page_size: pageSize,
+                        total_count: totalCount,
+                        total_pages: totalPages,
+                        has_prev: batchCurrentPage > 1,
+                        has_next: batchCurrentPage < totalPages
+                    };
+                } else {
+                    // Structured response format
+                    if (!responseData.success) {
+                        throw new Error(responseData.error || 'Failed to load batch data');
+                    }
+                    batches = responseData.uploads || [];
+                    pagination = responseData.pagination || {};
+                }
                 
                 // Update batch statistics
                 updateBatchStatistics(batches, pagination);
@@ -2220,7 +2639,7 @@
                     <h3>📄 Batch Upload Details</h3>
                     <div class="batch-detail-info">
                         <div><strong>File:</strong> ${upload.original_filename || upload.filename}</div>
-                        <div><strong>Uploaded:</strong> ${new Date(upload.uploaded_at).toLocaleString('en-IN')}</div>
+                        <div><strong>Uploaded:</strong> ${formatDateIST(upload.uploaded_at)}</div>
                         <div><strong>Status:</strong> <span class="batch-status ${upload.status.toLowerCase()}">${upload.status}</span></div>
                         <div><strong>Total Records:</strong> ${upload.total_records}</div>
                         <div><strong>Success:</strong> ${upload.success_records}</div>
@@ -2296,7 +2715,7 @@
         async function loadCallStatuses(isInitialLoad = false) {
             try {
                 if (!isInitialLoad) {
-                    console.debug('📞 Loading call status data...');
+                    logActivity('📞 Loading call status data...');
                 } else {
                     console.log('📞 Initial load: Loading call status data...');
                 }
@@ -2314,16 +2733,12 @@
                 updateCallStatusStats(data.statuses);
                 populateCallStatusTable(data.statuses);
                 
-                if (isInitialLoad) {
-                    logActivity(`✅ Loaded ${data.statuses.length} call status updates`);
-                } else {
-                    console.debug(`✅ Loaded ${data.statuses.length} call status updates`);
-                }
+                logActivity(`✅ Loaded ${data.statuses.length} call status updates`);
                 
             } catch (error) {
+                // Silently log to console only - don't show error toast
                 console.error('Error loading call statuses:', error);
-                logActivity(`❌ Failed to load call statuses: ${error.message}`);
-                showToast(`Failed to load call statuses: ${error.message}`, 'error');
+                // Feature not yet implemented - suppress warning
             }
         }
 
@@ -2344,23 +2759,31 @@
             // Calculate statistics
             const totalCalls = latestStatuses.length;
             const inProgressCalls = latestStatuses.filter(s => 
-                ['call_in_progress', 'calling', 'agent_transfer'].includes((s.status || '').toLowerCase())
+                s.status === 'call_in_progress' || s.status === 'ringing' || s.status === 'initiated'
             ).length;
-            const completedCalls = latestStatuses.filter(s => (s.status || '').toLowerCase() === 'call_completed').length;
-            const failedCalls = latestStatuses.filter(s => 
-                ['failed', 'disconnected'].includes((s.status || '').toLowerCase())
-            ).length;
+            const completedCalls = latestStatuses.filter(s => s.status === 'call_completed').length;
+            const failedCalls = latestStatuses.filter(s => s.status === 'call_failed').length;
             
-            // Update DOM elements
-            document.getElementById('totalCallsStat').textContent = totalCalls;
-            document.getElementById('inProgressCallsStat').textContent = inProgressCalls;
-            document.getElementById('callStatusCompletedStat').textContent = completedCalls;
-            document.getElementById('callStatusFailedStat').textContent = failedCalls;
+            // Update DOM elements with null checks
+            const totalCallsEl = document.getElementById('totalCallsStat');
+            const inProgressCallsEl = document.getElementById('inProgressCallsStat');
+            const completedCallsEl = document.getElementById('completedCallsStat');
+            const failedCallsEl = document.getElementById('failedCallsStat');
+            
+            if (totalCallsEl) totalCallsEl.textContent = totalCalls;
+            if (inProgressCallsEl) inProgressCallsEl.textContent = inProgressCalls;
+            if (completedCallsEl) completedCallsEl.textContent = completedCalls;
+            if (failedCallsEl) failedCallsEl.textContent = failedCalls;
         }
 
         // Populate call status table
         function populateCallStatusTable(statuses) {
             const tbody = document.getElementById('callStatusTableBody');
+            
+            if (!tbody) {
+                console.warn('Call status table body element not found');
+                return;
+            }
             
             if (statuses.length === 0) {
                 tbody.innerHTML = `
@@ -2379,8 +2802,7 @@
             );
             
             const statusRows = sortedStatuses.slice(0, 50).map(status => {
-                const timestamp = new Date(status.timestamp);
-                const formattedTime = timestamp.toLocaleString('en-IN', {
+                const formattedTime = formatDateIST(status.timestamp, {
                     day: '2-digit',
                     month: 'short',
                     hour: '2-digit',
@@ -2388,9 +2810,7 @@
                     second: '2-digit'
                 });
                 
-                const rawStatus = (status.status || '').toLowerCase();
-                const statusClass = mapCallStatus(rawStatus);
-                const statusLabel = formatStatusLabel(rawStatus);
+                const statusClass = status.status.toLowerCase().replace(/_/g, '_');
                 
                 return `
                     <tr>
@@ -2403,7 +2823,7 @@
                         </td>
                         <td>
                             <span class="call-status-badge status-${statusClass}">
-                                ${statusLabel}
+                                ${status.status.replace(/_/g, ' ')}
                             </span>
                         </td>
                         <td title="${status.message || 'No message'}">
@@ -2464,18 +2884,15 @@
                         <h4>Status Updates:</h4>
                         <div class="status-timeline">
                             ${callData.statuses.map(status => {
-                                const timestamp = new Date(status.timestamp);
-                                const formattedTime = timestamp.toLocaleString('en-IN');
-                                const rawStatus = (status.status || '').toLowerCase();
-                                const statusClass = mapCallStatus(rawStatus);
-                                const statusLabel = formatStatusLabel(rawStatus);
+                                const formattedTime = formatDateIST(status.timestamp);
+                                const statusClass = status.status.toLowerCase().replace(/_/g, '_');
                                 
                                 return `
                                     <div class="status-timeline-item">
                                         <div class="status-timestamp">${formattedTime}</div>
                                         <div class="status-info">
                                             <span class="call-status-badge status-${statusClass}">
-                                                ${statusLabel}
+                                                ${status.status.replace(/_/g, ' ')}
                                             </span>
                                             <div class="status-message">${status.message || 'No message'}</div>
                                         </div>
@@ -2505,7 +2922,7 @@
                 logActivity('⏸️ Auto refresh stopped');
             } else {
                 // Start auto refresh
-                autoRefreshInterval = setInterval(loadCallStatuses, 1000); // Every 1 second
+                autoRefreshInterval = setInterval(loadCallStatuses, 10000); // Every 10 seconds
                 isAutoRefresh = true;
                 button.classList.add('active');
                 text.textContent = '⏸️ Stop Auto';
@@ -2515,15 +2932,43 @@
 
         // Populate filter dropdown options
         function populateFilterOptions() {
-            const states = [...new Set(customers.map(c => c.state).filter(Boolean))].sort();
-            const clusters = [...new Set(customers.flatMap(c => c.loans.map(l => l.cluster).filter(Boolean)))].sort();
-            const branches = [...new Set(customers.flatMap(c => c.loans.map(l => l.branch).filter(Boolean)))].sort();
-            const employees = [...new Set(customers.flatMap(c => c.loans.map(l => l.employee_name).filter(Boolean)))].sort();
+            try {
+                // Defensive programming - ensure customers is an array and handle missing loans
+                if (!Array.isArray(customers)) {
+                    console.warn('Customers data is not an array:', customers);
+                    return;
+                }
+                
+                console.log('Populating filter options for', customers.length, 'customers');
+                
+                const states = [...new Set(customers.map(c => c.state).filter(Boolean))].sort();
+                
+                // Safely extract loan data with defensive checks
+                const clusters = [...new Set(customers.flatMap(c => {
+                    if (!c.loans || !Array.isArray(c.loans)) return [];
+                    return c.loans.map(l => l.cluster).filter(Boolean);
+                }))].sort();
+                
+                const branches = [...new Set(customers.flatMap(c => {
+                    if (!c.loans || !Array.isArray(c.loans)) return [];
+                    return c.loans.map(l => l.branch).filter(Boolean);
+                }))].sort();
+                
+                const employees = [...new Set(customers.flatMap(c => {
+                    if (!c.loans || !Array.isArray(c.loans)) return [];
+                    return c.loans.map(l => l.employee_name).filter(Boolean);
+                }))].sort();
 
-            populateSelect('stateFilter', states);
-            populateSelect('clusterFilter', clusters);
-            populateSelect('branchFilter', branches);
-            populateSelect('employeeFilter', employees);
+                console.log('Filter options:', { states: states.length, clusters: clusters.length, branches: branches.length, employees: employees.length });
+
+                populateSelect('stateFilter', states);
+                populateSelect('clusterFilter', clusters);
+                populateSelect('branchFilter', branches);
+                populateSelect('employeeFilter', employees);
+            } catch (error) {
+                console.error('Error in populateFilterOptions:', error);
+                console.error('Customers data:', customers);
+            }
         }
 
         function populateSelect(selectId, options) {
@@ -2558,40 +3003,59 @@
             const endDate = document.getElementById('endDate').value;
 
             filteredCustomers = customers.filter(customer => {
-                // Search filter
+                // Search filter with enhanced field mapping
                 if (searchTerm) {
                     const searchMatch = 
-                        customer.full_name.toLowerCase().includes(searchTerm) ||
-                        customer.primary_phone.includes(searchTerm) ||
-                        customer.loans.some(loan => loan.loan_id.toLowerCase().includes(searchTerm));
+                        (customer.full_name || customer.name || '')?.toLowerCase().includes(searchTerm) ||
+                        (customer.primary_phone || customer.phone_number || '').includes(searchTerm) ||
+                        customer.loans.some(loan => (loan.loan_id || '').toLowerCase().includes(searchTerm));
                     if (!searchMatch) return false;
                 }
 
-                // Upload date filter
+                // Upload date filter with enhanced field mapping
                 if (uploadDateFilter && uploadDateFilter !== 'custom') {
-                    // Check both first_uploaded_at AND updated_at for activity on this date
-                    const matchesFirstUpload = matchesDateFilter(customer.first_uploaded_at, uploadDateFilter);
-                    const matchesRecentActivity = matchesDateFilter(customer.updated_at, uploadDateFilter);
+                    // Get the most appropriate upload date for this customer
+                    const primaryUploadDate = customer.first_uploaded_at || customer.created_at;
+                    const recentActivityDate = customer.updated_at;
                     
-                    // Customer appears in date filter if they were either first uploaded OR had recent activity on this date
-                    if (!matchesFirstUpload && !matchesRecentActivity) return false;
+                    // Check both primary upload date AND recent activity for this date
+                    const matchesUpload = matchesDateFilter(primaryUploadDate, uploadDateFilter);
+                    const matchesActivity = matchesDateFilter(recentActivityDate, uploadDateFilter);
+                    
+                    // Customer appears in date filter if they were either uploaded OR had recent activity on this date
+                    if (!matchesUpload && !matchesActivity) return false;
                 }
 
-                // Custom date range filter
+                // Custom date range filter with enhanced field mapping
                 if (uploadDateFilter === 'custom' && (startDate || endDate)) {
-                    const firstUploadDate = new Date(customer.first_uploaded_at).toISOString().split('T')[0];
-                    const lastActivityDate = new Date(customer.updated_at).toISOString().split('T')[0];
+                    const primaryUploadDate = customer.first_uploaded_at || customer.created_at;
+                    const recentActivityDate = customer.updated_at;
                     
-                    // Check if either first upload or last activity falls within the date range
-                    const firstUploadInRange = (!startDate || firstUploadDate >= startDate) && (!endDate || firstUploadDate <= endDate);
-                    const lastActivityInRange = (!startDate || lastActivityDate >= startDate) && (!endDate || lastActivityDate <= endDate);
+                    let uploadDateString = null;
+                    let activityDateString = null;
                     
-                    if (!firstUploadInRange && !lastActivityInRange) return false;
+                    try {
+                        if (primaryUploadDate) {
+                            uploadDateString = new Date(primaryUploadDate).toISOString().split('T')[0];
+                        }
+                        if (recentActivityDate) {
+                            activityDateString = new Date(recentActivityDate).toISOString().split('T')[0];
+                        }
+                    } catch (error) {
+                        console.warn('Date parsing error for customer', customer.id, error);
+                    }
+                    
+                    // Check if either upload date or activity date falls within the date range
+                    const uploadInRange = uploadDateString && ((!startDate || uploadDateString >= startDate) && (!endDate || uploadDateString <= endDate));
+                    const activityInRange = activityDateString && ((!startDate || activityDateString >= startDate) && (!endDate || activityDateString <= endDate));
+                    
+                    if (!uploadInRange && !activityInRange) return false;
                 }
 
                 // Call status filter
                 if (callStatusFilter) {
-                    const customerStatus = mapCallStatus(customer.status || customer.call_status || 'ready');
+                    // Map status values
+                    const customerStatus = mapCallStatus(customer.call_status || 'ready');
                     if (customerStatus !== callStatusFilter) return false;
                 }
 
@@ -2600,6 +3064,11 @@
 
                 // Cluster/Branch/Employee filters (check loans)
                 if (clusterFilter || branchFilter || employeeFilter) {
+                    // Defensive check for loans array
+                    if (!customer.loans || !Array.isArray(customer.loans)) {
+                        return false; // If no loans data, doesn't match loan-based filters
+                    }
+                    
                     const hasMatchingLoan = customer.loans.some(loan => {
                         if (clusterFilter && loan.cluster !== clusterFilter) return false;
                         if (branchFilter && loan.branch !== branchFilter) return false;
@@ -2655,36 +3124,27 @@
             const normalized = (status || '').toLowerCase();
             const statusMap = {
                 'ready': 'ready',
-                'not_initiated': 'not_initiated',
-                'not_initialized': 'not_initiated',
+                'not_initiated': 'ready',
+                'not_initialized': 'ready',
                 'initiated': 'calling',
                 'ringing': 'calling',
                 'calling': 'calling',
                 'queued': 'calling',
                 'scheduled': 'ready',
-                'call_in_progress': 'call_in_progress',
-                'in_progress': 'call_in_progress',
-                'answered': 'call_in_progress',
-                'call_completed': 'call_completed',
-                'completed': 'call_completed',
+                'call_in_progress': 'in-progress',
+                'in_progress': 'in-progress',
+                'answered': 'in-progress',
+                'call_completed': 'completed',
+                'completed': 'completed',
                 'disconnected': 'disconnected',
                 'busy': 'disconnected',
                 'no_answer': 'disconnected',
                 'no-answer': 'disconnected',
                 'failed': 'failed',
                 'call_failed': 'failed',
-                'agent_transfer': 'agent_transfer'
+                'agent_transfer': 'agent-transfer'
             };
             return statusMap[normalized] || 'ready';
-        }
-
-        function formatStatusLabel(status) {
-            if (!status) return 'Ready';
-            return status
-                .replace(/[-_]/g, ' ')
-                .split(' ')
-                .map(word => word ? word.charAt(0).toUpperCase() + word.slice(1) : '')
-                .join(' ');
         }
 
         // Render customer table
@@ -2722,13 +3182,20 @@
                 const serialNo = index + 1;
                 
                 const loan = customer.loans[0] || {};
-                const uploadDate = getUploadDateBadge(customer.first_uploaded_at);
-                const rawStatus = (customer.status || customer.call_status || 'ready').toLowerCase();
-                const callStatusClass = mapCallStatus(rawStatus);
-                const callStatusLabel = formatStatusLabel(rawStatus);
+                
+                // Enhanced upload date handling with multiple fallback options
+                const uploadDate = getUploadDateBadge(
+                    customer.first_uploaded_at || customer.created_at, 
+                    customer.created_at
+                );
+                
+                // Determine which date to display in the detail line
+                const displayDate = customer.first_uploaded_at || customer.created_at;
+                
+                const callStatus = mapCallStatus(customer.call_status || 'ready');
                 
                 return `
-                    <tr class="customer-row ${callStatusClass}" data-customer-id="${customer.id}">
+                    <tr class="customer-row ${callStatus}" data-customer-id="${customer.id}">
                         <td>
                             <input type="checkbox" value="${customer.id}" 
                                    ${selectedCustomers.has(customer.id) ? 'checked' : ''}
@@ -2740,11 +3207,11 @@
                         <td>
                             <span class="upload-date-badge ${uploadDate.class}">${uploadDate.text}</span>
                             <div style="font-size: 0.8em; color: #666; margin-top: 2px;">
-                                ${formatDate(customer.first_uploaded_at)}
+                                ${formatDate(displayDate) || 'No date available'}
                             </div>
                         </td>
-                        <td><strong>${customer.full_name}</strong></td>
-                        <td>${customer.primary_phone}</td>
+                        <td><strong>${customer.full_name || customer.name || 'Unknown'}</strong></td>
+                        <td>${customer.primary_phone || customer.phone_number || 'N/A'}</td>
                         <td><code>${loan.loan_id || 'N/A'}</code></td>
                         <td>₹${formatCurrency(loan.outstanding_amount || 0)}</td>
                         <td>${formatDate(loan.next_due_date) || 'N/A'}</td>
@@ -2759,8 +3226,8 @@
                         <td>₹${formatCurrency(loan.last_paid_amount || 0)}</td>
                         <td>₹${formatCurrency(loan.due_amount || 0)}</td>
                         <td>
-                            <span class="status-badge status-${callStatusClass}">
-                                ${callStatusLabel}
+                            <span class="status-badge status-${callStatus}">
+                                ${callStatus.replace(/[-_]/g, ' ').replace(/\b\w/g, char => char.toUpperCase())}
                             </span>
                         </td>
                         <td>
@@ -2778,49 +3245,75 @@
             updateDisplayInfo();
         }
 
-        // Get upload date badge with IST timezone support
-        function getUploadDateBadge(dateString) {
-            if (!dateString) return { class: 'date-older', text: 'Unknown' };
+        // Get upload date badge - simplified IST only logic
+        function getUploadDateBadge(dateString, fallbackDate) {
+            const primaryDate = dateString || fallbackDate;
+            if (!primaryDate) return { class: 'date-older', text: 'Unknown' };
             
-            const date = new Date(dateString);
-            
-            // Get current date in IST
-            const now = new Date();
-            const istNow = new Date(now.toLocaleString('en-US', {timeZone: 'Asia/Kolkata'}));
-            
-            // Convert upload date to IST
-            const istDate = new Date(date.toLocaleString('en-US', {timeZone: 'Asia/Kolkata'}));
-            
-            // Get only the date part (ignore time)
-            const todayDateString = istNow.toDateString();
-            const uploadDateString = istDate.toDateString();
-            
-            // Compare dates
-            if (uploadDateString === todayDateString) {
-                return { class: 'date-today', text: 'Today' };
+            try {
+                // Parse the date (incoming from server in IST)
+                const uploadDate = new Date(primaryDate);
+                
+                // Validate date object
+                if (isNaN(uploadDate.getTime())) {
+                    return { class: 'date-older', text: 'Invalid Date' };
+                }
+                
+                // Convert current time to IST to match server timezone
+                const now = new Date();
+                const istOffset = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
+                const utc = now.getTime() + (now.getTimezoneOffset() * 60 * 1000);
+                const istNow = new Date(utc + istOffset);
+                
+                // Get date strings for simple comparison (both in IST now)
+                const todayStr = istNow.toDateString();
+                const uploadStr = uploadDate.toDateString();
+                
+                // Debug logging to see what's happening
+                console.log('Date comparison debug:', {
+                    primaryDate,
+                    uploadStr,
+                    todayStr,
+                    uploadDate: uploadDate.toISOString(),
+                    istNow: istNow.toISOString(),
+                    browserTime: now.toISOString()
+                });
+                
+                // Today check
+                if (uploadStr === todayStr) {
+                    return { class: 'date-today', text: 'Today' };
+                }
+                
+                // Yesterday check
+                const yesterday = new Date(istNow);
+                yesterday.setDate(istNow.getDate() - 1);
+                
+                if (uploadStr === yesterday.toDateString()) {
+                    return { class: 'date-yesterday', text: 'Yesterday' };
+                }
+                
+                // Calculate days difference using IST dates
+                const istNowDate = new Date(istNow);
+                istNowDate.setHours(0,0,0,0);
+                const uploadDateOnly = new Date(uploadDate);
+                uploadDateOnly.setHours(0,0,0,0);
+                
+                const timeDiff = istNowDate.getTime() - uploadDateOnly.getTime();
+                const daysDiff = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
+                
+                if (daysDiff <= 7 && daysDiff > 0) {
+                    return { class: 'date-week', text: `${daysDiff}d ago` };
+                } else if (daysDiff < 0) {
+                    // Future date
+                    return { class: 'date-future', text: 'Future' };
+                }
+                
+                return { class: 'date-older', text: `${daysDiff}d ago` };
+                
+            } catch (error) {
+                console.error('Error in getUploadDateBadge:', error, primaryDate);
+                return { class: 'date-older', text: 'Date Error' };
             }
-            
-            // Check for yesterday
-            const yesterday = new Date(istNow);
-            yesterday.setDate(yesterday.getDate() - 1);
-            const yesterdayDateString = yesterday.toDateString();
-            
-            if (uploadDateString === yesterdayDateString) {
-                return { class: 'date-yesterday', text: 'Yesterday' };
-            }
-            
-            // Calculate days difference more accurately
-            const timeDiff = istNow.setHours(0,0,0,0) - istDate.setHours(0,0,0,0);
-            const daysDiff = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
-            
-            if (daysDiff <= 7 && daysDiff > 0) {
-                return { class: 'date-week', text: `${daysDiff}d ago` };
-            } else if (daysDiff < 0) {
-                // Future date
-                return { class: 'date-future', text: 'Future' };
-            }
-            
-            return { class: 'date-older', text: `${daysDiff}d ago` };
         }
 
         // Format currency
@@ -2828,43 +3321,33 @@
             return new Intl.NumberFormat('en-IN').format(amount);
         }
 
-        // Format date with IST timezone
+        // Format date - simple IST formatting
         function formatDate(dateString) {
             if (!dateString) return null;
-            const date = new Date(dateString);
-            return date.toLocaleDateString('en-IN', {
-                timeZone: 'Asia/Kolkata',
-                day: '2-digit',
-                month: '2-digit',
-                year: 'numeric'
-            });
+            
+            try {
+                return formatDateOnlyIST(dateString);
+            } catch (error) {
+                console.error('Error formatting date:', error, dateString);
+                return 'Date Error';
+            }
         }
 
-        // Format date and time with IST timezone
+        // Format date and time - simple IST formatting
         function formatDateTime(dateString) {
             if (!dateString) return null;
-            const date = new Date(dateString);
-            return date.toLocaleString('en-IN', {
-                timeZone: 'Asia/Kolkata',
-                day: '2-digit',
-                month: '2-digit', 
-                year: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: true
-            });
+            try {
+                return formatDateIST(dateString);
+            } catch (error) {
+                console.error('Error formatting datetime:', error, dateString);
+                return 'DateTime Error';
+            }
         }
 
         // Get IST current time
         function getCurrentISTTime() {
-            return new Date().toLocaleString('en-IN', {
-                timeZone: 'Asia/Kolkata',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: true
-            });
+            const now = new Date();
+            return now.toLocaleTimeString('en-IN') + ' IST';
         }
 
         // Select all filtered customers
@@ -2990,19 +3473,16 @@
             }).length;
             
             const statusCounts = customers.reduce((acc, customer) => {
-                const rawStatus = (customer.status || customer.call_status || 'ready').toLowerCase();
-                const mappedStatus = mapCallStatus(rawStatus);
-                acc[mappedStatus] = (acc[mappedStatus] || 0) + 1;
+                const status = mapCallStatus(customer.call_status || 'ready');
+                acc[status] = (acc[status] || 0) + 1;
                 return acc;
             }, {});
 
             document.getElementById('totalCustomersStat').textContent = totalCustomers;
             document.getElementById('todayUploadsStat').textContent = todayUploads;
-            const readyCount = (statusCounts.ready || 0) + (statusCounts.not_initiated || 0);
-            document.getElementById('readyToCallStat').textContent = readyCount;
-            const activeCount = (statusCounts.call_in_progress || 0) + (statusCounts.calling || 0) + (statusCounts.agent_transfer || 0);
-            document.getElementById('activeCallsStat').textContent = activeCount;
-            document.getElementById('completedCallsStat').textContent = statusCounts.call_completed || 0;
+            document.getElementById('readyToCallStat').textContent = statusCounts.ready || 0;
+            document.getElementById('activeCallsStat').textContent = statusCounts['in-progress'] || 0;
+            document.getElementById('completedCallsStat').textContent = statusCounts.completed || 0;
             document.getElementById('totalCustomersDisplay').textContent = `Total: ${totalCustomers}`;
         }
 
@@ -3033,9 +3513,31 @@
                 const result = await response.json();
                 
                 if (result.success) {
-                    const successMessage = `Upload successful: ${result.processing_results.success_records} records processed`;
+                    // Enhanced upload tracking with detailed statistics
+                    const stats = result.processing_results;
+                    const totalRecords = stats.total_records || 0;
+                    const successRecords = stats.success_records || 0;
+                    const failedRecords = stats.failed_records || 0;
+                    const newRecords = stats.new_customers || 0;
+                    const updatedRecords = stats.updated_customers || 0;
+                    
+                    const successMessage = `Upload completed: ${successRecords}/${totalRecords} records processed successfully`;
                     logActivity(`✅ ${successMessage}`);
+                    
+                    // Show detailed upload statistics
+                    let detailMessage = `📊 Upload Statistics:\n`;
+                    detailMessage += `• Total Records: ${totalRecords}\n`;
+                    detailMessage += `• Successfully Processed: ${successRecords}\n`;
+                    if (newRecords > 0) detailMessage += `• New Customers: ${newRecords}\n`;
+                    if (updatedRecords > 0) detailMessage += `• Updated Customers: ${updatedRecords}\n`;
+                    if (failedRecords > 0) detailMessage += `• Failed Records: ${failedRecords}\n`;
+                    
+                    logActivity(detailMessage);
                     showToast(successMessage, 'success');
+                    
+                    // Show upload tracking info to prevent duplicate file uploads
+                    const uploadId = result.upload_id || 'unknown';
+                    logActivity(`📂 File Upload ID: ${uploadId} - Use this to track your upload`);
                     
                     // Refresh customer data from database after successful upload
                     setTimeout(() => {
@@ -3064,7 +3566,7 @@
                     return;
                 }
 
-                logActivity(`Initiating call for ${customer.full_name} (${customer.primary_phone})`);
+                logActivity(`Initiating call for ${customer.name || 'Unknown'} (${customer.phone_number || 'N/A'})`);
                 
                 // Disable the call button for this customer to prevent double calls
                 const callBtn = document.querySelector(`button[onclick="callCustomer('${customerId}')"]`);
@@ -3085,12 +3587,12 @@
                 const result = await response.json();
                 
                 if (response.ok && result.success) {
-                    logActivity(`✅ Call initiated successfully for ${customer.full_name}`);
+                    logActivity(`✅ Call initiated successfully for ${customer.name || 'Unknown'}`);
                     // Update customer status in the UI
                     updateCustomerCallStatus(customerId, 'calling', 'Call initiated');
                     
                     // Show success toast notification
-                    showToast(`Call started for ${customer.full_name}`, 'success');
+                    showToast(`Call started for ${customer.name || 'Unknown'}`, 'success');
                 } else {
                     throw new Error(result.message || `HTTP ${response.status}: ${response.statusText}`);
                 }
@@ -3118,7 +3620,7 @@
             const customerCount = selectedCustomers.size;
             const selectedCustomerNames = Array.from(selectedCustomers).map(id => {
                 const customer = customers.find(c => c.id === id);
-                return customer ? customer.full_name : `ID: ${id}`;
+                return customer ? customer.name : `ID: ${id}`;
             }).slice(0, 3).join(', ');
             
             const confirmMessage = customerCount <= 3 
@@ -3259,8 +3761,8 @@
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
                     <div>
                         <h4>👤 Customer Information</h4>
-                        <p><strong>Name:</strong> ${customer.full_name}</p>
-                        <p><strong>Phone:</strong> ${customer.primary_phone}</p>
+                        <p><strong>Name:</strong> ${customer.name || 'Unknown'}</p>
+                        <p><strong>Phone:</strong> ${customer.phone_number || 'N/A'}</p>
                         <p><strong>State:</strong> ${customer.state || 'N/A'}</p>
                         <p><strong>Email:</strong> ${customer.email || 'N/A'}</p>
                         <p><strong>First Uploaded:</strong> ${formatDate(customer.first_uploaded_at)}</p>
@@ -3324,8 +3826,8 @@
             const rows = data.map(customer => {
                 const loan = customer.loans[0] || {};
                 return [
-                    customer.full_name,
-                    customer.primary_phone,
+                    customer.name || 'Unknown',
+                    customer.phone_number || 'N/A',
                     customer.state || '',
                     loan.loan_id || '',
                     loan.outstanding_amount || 0,
@@ -3340,7 +3842,7 @@
                     loan.employee_id || '',
                     loan.employee_contact_number || '',
                     customer.first_uploaded_at,
-                    (customer.status || customer.call_status || 'ready')
+                    customer.call_status || 'ready'
                 ];
             });
             
@@ -3421,7 +3923,7 @@
             }, DATA_REFRESH_INTERVAL);
             
             // Show notification about auto-refresh
-            showToast('Auto-refresh enabled: Call statuses refresh every second and data every minute', 'info', 4000);
+            showToast('Auto-refresh enabled: Data will update every minute', 'info', 4000);
         }
 
         function showLoading(show) {
@@ -3507,22 +4009,24 @@
         }
 
         function setupAutoRefresh() {
-            // Update status display every second
+            // Update status every 30 seconds
             refreshInterval = setInterval(function() {
-                const refreshCounterEl = document.getElementById('statusRefreshCount');
-                const currentCount = parseInt(refreshCounterEl.textContent.split(': ')[1] || '0');
-                const nextCount = currentCount + 1;
-                refreshCounterEl.textContent = `Refreshes: ${nextCount}`;
+                const refreshCount = parseInt(document.getElementById('statusRefreshCount').textContent.split(': ')[1] || '0');
+                document.getElementById('statusRefreshCount').textContent = `Refreshes: ${refreshCount + 1}`;
                 
-                if (nextCount % 60 === 0) { // Roughly once per minute
-                    console.debug('🔄 Auto-refreshing dashboard data...');
-                    loadCustomerData(false);
+                // Auto-refresh customer data every 5 minutes (300 seconds)
+                if (refreshCount > 0 && refreshCount % 10 === 0) {
+                    logActivity('🔄 Auto-refreshing customer data from database...');
+                    loadCustomerData(false); // Silent refresh
+                    
+                    // Also refresh batch data every 5 minutes
                     loadBatchDetails();
                 } else {
+                    // Just update statistics and timestamp
                     document.getElementById('lastStatusUpdate').textContent = `Last update: ${getCurrentISTTime()} IST`;
                     updateStatistics();
                 }
-            }, 1000);
+            }, 30000);
             
             // Initial data load
             logActivity('🚀 Starting initial data load from database...');
@@ -3531,20 +4035,12 @@
         // Update customer call status
         function updateCustomerCallStatus(customerId, status, message) {
             const customer = customers.find(c => c.id === customerId);
-            if (!customer) {
-                logActivity(`ℹ️ Status update received for unknown customer (${customerId}). Refreshing data...`);
-                loadCustomerData(true);
-                return;
+            if (customer) {
+                customer.call_status = status;
+                renderCustomerTable();
+                updateStatistics();
+                logActivity(`Customer ${customer.name || 'Unknown'}: ${message || status}`);
             }
-
-            const normalizedStatus = (status || 'ready').toLowerCase();
-            customer.call_status = normalizedStatus;
-            customer.status = normalizedStatus;
-
-            const statusLabel = formatStatusLabel(normalizedStatus);
-            logActivity(`Customer ${customer.full_name}: ${message || statusLabel}`);
-
-            applyFilters();
         }
 
         // Cleanup on page unload

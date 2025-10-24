@@ -19,21 +19,23 @@ import requests
 import re
 import uvicorn
 import pytz
+import threading
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
 from fastapi import (Body, FastAPI, File, HTTPException, Request, UploadFile,
-                     WebSocket)
+                     WebSocket, Query)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse,
-                               StreamingResponse)
+                               RedirectResponse, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from requests.auth import HTTPBasicAuth
 from starlette.websockets import WebSocketDisconnect
-from typing import Any, Dict, Optional, List, Union
+from typing import Any, Dict, Optional, List, Union, Callable, Awaitable
 from sqlalchemy.orm import joinedload
+from utils.session_middleware import RedisSessionMiddleware, get_session
 
 # Load environment variables at the very beginning
 load_dotenv()
@@ -83,6 +85,7 @@ from utils.logger import setup_application_logging, logger
 from utils.production_asr import ProductionSarvamHandler
 from utils.redis_session import (init_redis, redis_manager,
                                  generate_websocket_session_id)
+from utils.cognito_hosted_auth import cognito_auth
 
 
 # --- Lifespan Management ---
@@ -108,15 +111,39 @@ async def lifespan(app: FastAPI):
         logger.app.warning("❌ Redis initialization failed - running without session management")
     
     logger.app.info("🎉 Application startup complete!")
-    
-    yield
-    
-    # Shutdown
-    logger.app.info("🛑 Shutting down Voice Assistant Application...")
+
+    heartbeat_task: Optional[asyncio.Task] = None
+    if claude_runtime_client and CLAUDE_MODEL_ID:
+        heartbeat_task = asyncio.create_task(claude_heartbeat_loop())
+
+    try:
+        yield
+    finally:
+        if heartbeat_task:
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+
+        # Shutdown
+        logger.app.info("🛑 Shutting down Voice Assistant Application...")
 
 app = FastAPI(
     title="Voice Assistant Call Management System",
     lifespan=lifespan
+)
+
+# Session configuration (Redis-backed for larger payloads)
+SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", "voice-bot-session-secret")
+SESSION_MAX_AGE = int(os.getenv("SESSION_MAX_AGE", "7200"))
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+SESSION_SECURE = BASE_URL.startswith("https://")
+
+app.add_middleware(
+    RedisSessionMiddleware,
+    secret_key=SESSION_SECRET_KEY,
+    max_age=SESSION_MAX_AGE,
+    secure=SESSION_SECURE,
+    samesite="none" if SESSION_SECURE else "lax",
 )
 
 # Add CORS middleware
@@ -247,6 +274,7 @@ class ClaudeChatSession:
         self.call_sid = call_sid
         self.context = context
         self.messages: List[Dict[str, Any]] = []
+        self._last_stream_output: str = ""
         base_prompt = CLAUDE_SYSTEM_PROMPT or ""
         context_prompt = (
             "Caller details: name={name}, loan_id={loan_id}, phone={phone}. "
@@ -260,15 +288,20 @@ class ClaudeChatSession:
         if base_prompt:
             self.system_messages.append({"text": base_prompt})
         self.system_messages.append({"text": context_prompt})
+        self._lock = threading.Lock()
+
+    def _build_user_message(self, user_text: str) -> Dict[str, Any]:
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": user_text}]
+        }
 
     def send(self, user_text: str) -> str:
         if not claude_runtime_client or not CLAUDE_MODEL_ID:
             raise RuntimeError("Claude runtime client not configured")
 
-        self.messages.append({
-            "role": "user",
-            "content": [{"text": user_text}]
-        })
+        user_message = self._build_user_message(user_text)
+        self.messages.append(user_message)
 
         try:
             response = claude_runtime_client.converse(
@@ -300,6 +333,59 @@ class ClaudeChatSession:
         })
         return cleaned
 
+    def iter_stream(self, user_text: str):
+        if not claude_runtime_client or not CLAUDE_MODEL_ID:
+            raise RuntimeError("Claude runtime client not configured")
+
+        if not hasattr(claude_runtime_client, "converse_stream"):
+            raise RuntimeError("Claude streaming interface unavailable")
+
+        user_message = self._build_user_message(user_text)
+        aggregated: List[str] = []
+
+        with self._lock:
+            base_messages = list(self.messages) + [user_message]
+
+        try:
+            response = claude_runtime_client.converse_stream(
+                modelId=CLAUDE_MODEL_ID,
+                messages=base_messages,
+                system=self.system_messages,
+                inferenceConfig={"temperature": 0.3, "maxTokens": 512, "topP": 0.9},
+            )
+        except (BotoCoreError, ClientError) as err:
+            raise RuntimeError(f"Claude converse_stream error: {err}") from err
+        except Exception as err:
+            raise RuntimeError(f"Unexpected Claude streaming error: {err}") from err
+
+        try:
+            stream = response.get("stream")
+            if not stream:
+                raise RuntimeError("Claude streaming response missing 'stream'")
+
+            for event in stream:
+                delta = event.get("contentBlockDelta")
+                if not delta:
+                    continue
+                delta_content = delta.get("delta") or {}
+                text_piece = delta_content.get("text")
+                if text_piece:
+                    aggregated.append(text_piece)
+                    yield text_piece
+
+        except Exception as stream_err:
+            raise RuntimeError(f"Error while reading Claude stream: {stream_err}") from stream_err
+
+        final_text = "".join(aggregated).strip()
+        assistant_message = {
+            "role": "assistant",
+            "content": [{"type": "text", "text": final_text}]
+        }
+
+        with self._lock:
+            self.messages = base_messages + [assistant_message]
+            self._last_stream_output = final_text
+
 
 class ClaudeChatManager:
     def __init__(self) -> None:
@@ -325,16 +411,95 @@ class ClaudeChatManager:
 
 claude_chat_manager = ClaudeChatManager()
 
+CLAUDE_HEARTBEAT_INTERVAL = int(os.getenv("CLAUDE_HEARTBEAT_INTERVAL", "240"))
+
+
+async def claude_heartbeat_loop():
+    if not claude_runtime_client or not CLAUDE_MODEL_ID:
+        return
+    interval = max(CLAUDE_HEARTBEAT_INTERVAL, 120)
+    while True:
+        try:
+            loop = asyncio.get_running_loop()
+
+            def _ping() -> None:
+                try:
+                    claude_runtime_client.converse(
+                        modelId=CLAUDE_MODEL_ID,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [{"text": "ping"}]
+                            }
+                        ],
+                        system=[{"text": "You are a latency heartbeat. Reply with the word ping."}],
+                        inferenceConfig={"maxTokens": 8, "temperature": 0.0},
+                    )
+                except Exception as heartbeat_err:  # pragma: no cover
+                    raise heartbeat_err
+
+            await loop.run_in_executor(None, _ping)
+            logger.app.debug("🫀 Sent Claude heartbeat ping")
+        except Exception as heartbeat_error:
+            logger.app.warning(f"⚠️ Claude heartbeat error: {heartbeat_error}")
+        await asyncio.sleep(interval)
+
 
 async def claude_reply(chat: ClaudeChatSession, message: str) -> Optional[str]:
     if not chat or not message:
         return None
-    loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(None, chat.send, message)
+        return await stream_claude_response(chat, message)
     except Exception as err:
         logger.error.error(f"❌ Claude reply failed: {err}")
         return None
+
+
+async def stream_claude_response(
+    chat: ClaudeChatSession,
+    message: str,
+    on_chunk: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> str:
+    if not chat or not message:
+        return ""
+
+    if hasattr(claude_runtime_client, "converse_stream"):
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def worker():
+            try:
+                for chunk in chat.iter_stream(message):
+                    loop.call_soon_threadsafe(queue.put_nowait, ("chunk", chunk))
+                final_text = getattr(chat, "_last_stream_output", "")
+                loop.call_soon_threadsafe(queue.put_nowait, ("final", final_text))
+            except Exception as err:
+                loop.call_soon_threadsafe(queue.put_nowait, ("error", err))
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, ("close", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        final_text = ""
+        while True:
+            kind, payload = await queue.get()
+            if kind == "chunk":
+                if on_chunk and payload:
+                    await on_chunk(payload)
+            elif kind == "final":
+                final_text = payload or ""
+            elif kind == "error":
+                raise payload
+            elif kind == "close":
+                break
+        return final_text or getattr(chat, "_last_stream_output", "")
+
+    # Fallback to non-streaming request
+    loop = asyncio.get_running_loop()
+    text = await loop.run_in_executor(None, chat.send, message)
+    if on_chunk and text:
+        await on_chunk(text)
+    return text or ""
 
 
 def parse_claude_response(raw: str) -> tuple[str, str]:
@@ -1014,11 +1179,52 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="static")
 
 # --- HTML Endpoints ---
+def require_login(request: Request) -> Dict[str, Any]:
+    """
+    Simple session guard. Redirect to Cognito login if the user is not authenticated.
+    Assumes session middleware is configured and sets 'user' in the session on login.
+    """
+    session = get_session(request)
+    session_user = session.get("user")
+    if not session_user:
+        login_url = os.getenv("COGNITO_LOGIN_URL")
+        if not login_url:
+            login_url = cognito_auth.get_login_url()
+        raise HTTPException(status_code=307, detail="Redirecting to login", headers={"Location": login_url})
+    return session_user
+
+
+@app.get("/auth/login", response_class=HTMLResponse)
+async def auth_login(request: Request, state: str = "default"):
+    """
+    Redirect users to Cognito hosted UI login (or return login URL in JSON if AJAX).
+    """
+    login_url = os.getenv("COGNITO_LOGIN_URL")
+    if not login_url:
+        login_url = cognito_auth.get_login_url(state)
+
+    # If the request is expecting JSON (e.g. from Fetch), return a JSON response.
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return JSONResponse({"success": True, "login_url": login_url, "state": state})
+
+    return RedirectResponse(url=login_url)
+
+
+@app.get("/login")
+async def legacy_login_redirect(state: str = "manual"):
+    """
+    Backward-compatible login endpoint that forwards to the Cognito hosted UI.
+    """
+    login_url = os.getenv("COGNITO_LOGIN_URL") or cognito_auth.get_login_url(state)
+    return RedirectResponse(url=login_url)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
     """
     Serves the improved dashboard HTML file at the root URL.
     """
+    require_login(request)
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.get("/original", response_class=HTMLResponse)
@@ -1026,7 +1232,107 @@ async def get_original_dashboard(request: Request):
     """
     Serves the original dashboard HTML file for backward compatibility.
     """
+    require_login(request)
     return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.get("/auth/callback")
+async def auth_callback(
+    request: Request,
+    code: Optional[str] = Query(default=None),
+    state: Optional[str] = Query(default="default"),
+    error: Optional[str] = Query(default=None),
+    error_description: Optional[str] = Query(default=None),
+    redirect: Optional[str] = Query(default=None),
+):
+    """
+    Handle Cognito hosted UI callback. Exchanges authorization code for tokens,
+    stores user info in the session, and redirects to the dashboard.
+    """
+    if error:
+        detail = f"Cognito authentication failed: {error}"
+        if error_description:
+            detail = f"{detail} - {error_description}"
+        raise HTTPException(status_code=400, detail=detail)
+
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
+
+    try:
+        token_data = await cognito_auth.exchange_code_for_tokens(code)
+        access_token = token_data.get("access_token")
+        id_token = token_data.get("id_token")
+        refresh_token = token_data.get("refresh_token")
+
+        if not access_token:
+            raise HTTPException(status_code=400, detail="Cognito did not return an access token")
+
+        user_info = await cognito_auth.get_user_info_from_access_token(access_token)
+
+        session_user = {
+            "info": user_info,
+            "access_token": access_token,
+            "id_token": id_token,
+            "refresh_token": refresh_token,
+            "state": state,
+            "authenticated_at": datetime.utcnow().isoformat(),
+        }
+
+        session = get_session(request)
+        session["user"] = session_user
+
+        redirect_url = redirect or os.getenv("POST_LOGIN_REDIRECT_URL") or "/"
+        return RedirectResponse(url=redirect_url)
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error.error(f"❌ /auth/callback error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to complete Cognito login") from exc
+
+
+@app.post("/api/logout")
+async def api_logout(request: Request):
+    """
+    Clear current session and return Cognito logout URL for frontend redirection.
+    """
+    session = get_session(request)
+    if "user" in session:
+        session.pop("user", None)
+    logout_url = cognito_auth.get_logout_url()
+    return JSONResponse({"success": True, "logout_url": logout_url})
+
+
+@app.get("/auth/session-status")
+async def auth_session_status(request: Request):
+    """
+    Return current authentication session status for the dashboard.
+    """
+    session = get_session(request)
+    user = session.get("user")
+    ttl = session.get_ttl()
+    remaining = ttl if isinstance(ttl, int) and ttl >= 0 else SESSION_MAX_AGE
+
+    if not user:
+        return JSONResponse(
+            {"authenticated": False, "expired": True, "remaining_time": 0, "user": None}
+        )
+
+    user_info = user.get("info") or {}
+    display_user = {
+        "name": user_info.get("name") or user_info.get("email") or user_info.get("username"),
+        "email": user_info.get("email"),
+        "username": user_info.get("username"),
+    }
+
+    return JSONResponse(
+        {
+            "authenticated": True,
+            "expired": remaining <= 0,
+            "remaining_time": max(remaining, 0),
+            "user": display_user,
+        }
+    )
 
 # --- WebSocket URL Generator for Exotel Flow ---
 @app.get("/ws-url", response_class=PlainTextResponse)
@@ -1475,7 +1781,71 @@ async def run_voice_session(
             logger.websocket.info(f"🚫 Customer refusal detected (count={refusal_count})")
 
         claude_turns += 1
-        raw_reply = await claude_reply(claude_chat, transcript)
+
+        sentence_enders = {'.', '!', '?', '।', '！', '？'}
+        tag_pattern = re.compile(r"\[(?:continue|promise|escalate)\]", re.IGNORECASE)
+        speech_queue: asyncio.Queue = asyncio.Queue()
+        speech_closed = False
+
+        async def speech_worker():
+            while True:
+                sentence = await speech_queue.get()
+                if sentence is None:
+                    break
+                trimmed = sentence.strip()
+                if trimmed:
+                    await speak_text(trimmed, current_language)
+
+        async def finalize_speech_queue():
+            nonlocal speech_closed
+            if not speech_closed:
+                speech_closed = True
+                await speech_queue.put(None)
+                await speech_worker_task
+
+        speech_worker_task = asyncio.create_task(speech_worker())
+        buffer = ""
+
+        def split_sentences(text: str) -> tuple[List[str], str]:
+            sentences: List[str] = []
+            last_idx = 0
+            for idx, char in enumerate(text):
+                if char in sentence_enders:
+                    next_idx = idx + 1
+                    while next_idx < len(text) and text[next_idx].isspace():
+                        next_idx += 1
+                    segment = text[last_idx:idx + 1].strip()
+                    if segment:
+                        sentences.append(segment)
+                    last_idx = idx + 1
+            remainder = text[last_idx:]
+            return sentences, remainder
+
+        async def handle_chunk(chunk: str):
+            nonlocal buffer
+            if not chunk:
+                return
+            cleaned = tag_pattern.sub("", chunk)
+            if not cleaned:
+                return
+            buffer += cleaned
+            sentences, remainder = split_sentences(buffer)
+            buffer = remainder
+            for sentence in sentences:
+                await speech_queue.put(sentence)
+
+        try:
+            raw_reply = await stream_claude_response(claude_chat, transcript, handle_chunk)
+        except Exception as err:
+            logger.websocket.error(f"❌ Streaming Claude reply failed: {err}")
+            await finalize_speech_queue()
+            await speak_text("I didn't catch that. Could you please repeat?")
+            return "continue"
+
+        if buffer.strip():
+            await speech_queue.put(buffer.strip())
+        await finalize_speech_queue()
+
         if not raw_reply:
             await speak_text("I didn't catch that. Could you please repeat?")
             return "continue"
@@ -1495,6 +1865,7 @@ async def run_voice_session(
                 "I understand this has been difficult. I'll transfer you to our specialist for more help."
             )
             status = "escalate"
+            cleaned_agent_text = agent_text
         elif status == "escalate" and not allowed_to_escalate:
             logger.websocket.info(
                 f"ℹ️ Escalation deferred (refusal_count={refusal_count} < {CLAUDE_REFUSAL_THRESHOLD}); continuing conversation"
@@ -1520,8 +1891,6 @@ async def run_voice_session(
             conversation_stage = "WAITING_DISCONNECT"
             interaction_complete = True
             return "end"
-
-        await speak_text(agent_text, current_language)
 
         if status == "promise":
             await speak_text(
