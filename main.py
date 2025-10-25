@@ -274,6 +274,7 @@ class ClaudeChatSession:
         self.call_sid = call_sid
         self.context = context
         self.messages: List[Dict[str, Any]] = []
+        self.language_code = context.get("lang") or context.get("language_code") or "en-IN"
         self._last_stream_output: str = ""
         base_prompt = CLAUDE_SYSTEM_PROMPT or ""
         context_prompt = (
@@ -288,12 +289,20 @@ class ClaudeChatSession:
         if base_prompt:
             self.system_messages.append({"text": base_prompt})
         self.system_messages.append({"text": context_prompt})
+        language_name = LANGUAGE_DISPLAY_NAMES.get(self.language_code, "English")
+        self.system_messages.append({
+            "text": (
+                f"The customer prefers to converse in {language_name}. Respond naturally in {language_name}"
+                f" ({self.language_code}) unless explicitly asked to switch languages. Always conclude"
+                " each reply with one of the tags [continue], [promise], or [escalate]."
+            )
+        })
         self._lock = threading.Lock()
 
     def _build_user_message(self, user_text: str) -> Dict[str, Any]:
         return {
             "role": "user",
-            "content": [{"type": "text", "text": user_text}]
+            "content": [{"text": user_text}]
         }
 
     def send(self, user_text: str) -> str:
@@ -379,7 +388,7 @@ class ClaudeChatSession:
         final_text = "".join(aggregated).strip()
         assistant_message = {
             "role": "assistant",
-            "content": [{"type": "text", "text": final_text}]
+            "content": [{"text": final_text}]
         }
 
         with self._lock:
@@ -506,11 +515,10 @@ def parse_claude_response(raw: str) -> tuple[str, str]:
     if not raw:
         return "", "continue"
     text = raw.strip()
-    bracket_pattern = r"\[(continue|promise|escalate)\]\s*$"
-    match = re.search(bracket_pattern, text, re.IGNORECASE)
+    match = STATUS_TAG_PATTERN.search(text)
     if match:
         status = match.group(1).lower()
-        response = text[:match.start()].strip()
+        response = STATUS_TAG_PATTERN.sub("", text).strip()
         return response, status
     try:
         data = json.loads(text)
@@ -523,10 +531,12 @@ def parse_claude_response(raw: str) -> tuple[str, str]:
         status = status.lower()
         if status not in {"continue", "promise", "escalate"}:
             status = "continue"
-        return resp.strip(), status
+        cleaned_resp = STATUS_TAG_PATTERN.sub("", resp).strip()
+        return cleaned_resp, status
     except json.JSONDecodeError:
         logger.websocket.warning("⚠️ Claude returned text without status tag; defaulting to continue")
-        return text, "continue"
+        cleaned = STATUS_TAG_PATTERN.sub("", text).strip()
+        return cleaned, "continue"
 
 
 base_transcript_dir = Path(os.getenv("VOICEBOT_RUNTIME_DIR") or Path(__file__).resolve().parent)
@@ -733,7 +743,7 @@ SPEAK_NOW_PROMPT = {
 
 # --- TTS & Audio Helper Functions ---
 
-async def play_transfer_to_agent(websocket, customer_number: str, call_sid: str, customer_name: str = None):
+async def play_transfer_to_agent(websocket, customer_number: str, call_sid: str, customer_name: str = None, language_code: str = "en-IN"):
     """
     Plays a transfer message to the customer, then triggers Exotel agent transfer.
     Updates DB and notifies frontend.
@@ -741,22 +751,13 @@ async def play_transfer_to_agent(websocket, customer_number: str, call_sid: str,
     try:
         logger.websocket.info(f"🤝 Starting agent transfer for CallSid={call_sid}, Customer={customer_number}")
 
-        # 1. Play transfer message via TTS
-        transfer_message = "Please wait while I transfer your call to an agent."
-        await play_audio_message(websocket, transfer_message, language_code="en-IN")
-        await asyncio.sleep(2)  # allow message to play
-
-        # 2. Get agent number from environment
-        agent_number = os.getenv("AGENT_PHONE_NUMBER")
-        if not agent_number:
-            logger.error.error("❌ No AGENT_PHONE_NUMBER set in environment variables")
-            return
-
-        # 3. Trigger Exotel transfer
-        await trigger_exotel_agent_transfer(customer_number, agent_number)
-        logger.websocket.info(f"📞 Exotel agent transfer initiated: {customer_number} → {agent_number}")
-
-        # 4. Update DB with agent transfer status
+        status_messages = {
+            "continue": "Agent transfer not required; continuing bot conversation.",
+            "escalate": "Customer asked for a specialist; connecting you now.",
+            "promise": "Thanks for confirming. We'll mark this call as completed.",
+        }
+        status_message = status_messages.get("continue", "Please continue with the assistant.")
+        await play_audio_message(websocket, status_message, language_code=language_code)
         session = db_manager.get_session()
         customer_id_event: Optional[str] = None
         try:
@@ -969,37 +970,34 @@ def _loan_suffix(loan_id: Optional[str]) -> str:
 async def play_confirmation_prompt(websocket, customer_info: Dict[str, Any]) -> None:
     name = customer_info.get("name") or "there"
     loan_suffix = _loan_suffix(customer_info.get("loan_id"))
-    prompt = (
-        f"Hello {name}. I am a voice agent calling from a bank. "
-        f"Am I speaking with {name} with the loan ID ending in {loan_suffix}?"
-    )
+    language_code = customer_info.get("lang") or "en-IN"
+    prompt = get_localized_prompt("confirmation", language_code, name=name, loan_suffix=loan_suffix)
     logger.tts.info(f"🔁 Confirmation prompt: {prompt}")
-    audio_bytes = await sarvam_handler.synthesize_tts(prompt, "en-IN")
+    audio_bytes = await sarvam_handler.synthesize_tts(prompt, language_code)
     await stream_audio_to_websocket(websocket, audio_bytes)
 
 
 async def play_connecting_prompt(websocket, language: str = "en-IN") -> None:
-    prompt = "Wait a second, I will connect you to our agent."
+    prompt = get_localized_prompt("connecting", language)
     logger.tts.info(f"🔁 Connecting prompt: {prompt}")
     audio_bytes = await sarvam_handler.synthesize_tts(prompt, language or "en-IN")
     await stream_audio_to_websocket(websocket, audio_bytes)
 
 
-async def play_sorry_prompt(websocket) -> None:
-    prompt = "Sorry for the mistake. Thank you."
+async def play_sorry_prompt(websocket, language: str = "en-IN") -> None:
+    prompt = get_localized_prompt("sorry", language)
     logger.tts.info(f"🔁 Sorry prompt: {prompt}")
-    audio_bytes = await sarvam_handler.synthesize_tts(prompt, "en-IN")
+    audio_bytes = await sarvam_handler.synthesize_tts(prompt, language or "en-IN")
     await stream_audio_to_websocket(websocket, audio_bytes)
 
 
 async def play_repeat_prompt(websocket, customer_info: Dict[str, Any]) -> None:
     name = customer_info.get("name") or "there"
     loan_suffix = _loan_suffix(customer_info.get("loan_id"))
-    prompt = (
-        f"I am sorry, I did not catch that. Am I speaking with {name} with the loan ID ending in {loan_suffix}?"
-    )
+    language_code = customer_info.get("lang") or "en-IN"
+    prompt = get_localized_prompt("repeat", language_code, name=name, loan_suffix=loan_suffix)
     logger.tts.info(f"🔁 Repeat prompt: {prompt}")
-    audio_bytes = await sarvam_handler.synthesize_tts(prompt, "en-IN")
+    audio_bytes = await sarvam_handler.synthesize_tts(prompt, language_code)
     await stream_audio_to_websocket(websocket, audio_bytes)
 
 # --- Language and Intent Detection ---
@@ -1077,7 +1075,6 @@ def detect_intent_with_claude(transcript: str, lang: str) -> str:
                 "role": "user",
                 "content": [
                     {
-                        "type": "text",
                         "text": (
                             "You are classifying a user's short reply to this question: "
                             "'Would you like me to connect you to one of our agents to assist you better?'\n\n"
@@ -1087,7 +1084,7 @@ def detect_intent_with_claude(transcript: str, lang: str) -> str:
                             "- negative: no/not now/नहीं/இல்லை/etc (does not want)\n"
                             "- unclear: ambiguous filler or unrelated\n\n"
                             "Respond with only one word: affirmative | negative | unclear"
-                        ),
+                        )
                     }
                 ],
             }
@@ -1158,6 +1155,8 @@ STATE_TO_LANGUAGE = {
     'uttarakhand': 'hi-IN',
     'west bengal': 'bn-IN',
     'delhi': 'hi-IN',
+    'new delhi': 'hi-IN',
+    'delhi ncr': 'hi-IN',
     'puducherry': 'ta-IN',
     'chandigarh': 'hi-IN',
     'andaman and nicobar islands': 'hi-IN',
@@ -1166,6 +1165,137 @@ STATE_TO_LANGUAGE = {
     'ladakh': 'hi-IN',
     'lakshadweep': 'ml-IN',
 }
+
+STATUS_TAG_PATTERN = re.compile(r"\[\s*(continue|promise|escalate)\s*\]", re.IGNORECASE)
+
+LANGUAGE_DISPLAY_NAMES = {
+    "en-IN": "English",
+    "hi-IN": "Hindi",
+    "ta-IN": "Tamil",
+    "te-IN": "Telugu",
+    "ml-IN": "Malayalam",
+    "kn-IN": "Kannada",
+    "bn-IN": "Bengali",
+    "mr-IN": "Marathi",
+    "gu-IN": "Gujarati",
+    "pa-IN": "Punjabi",
+    "od-IN": "Odia",
+}
+
+LANGUAGE_PROMPTS = {
+    "en-IN": {
+        "confirmation": "Hello {name}. I'm calling from the bank. Am I speaking with {name} whose loan ID ends in {loan_suffix}?",
+        "connecting": "One moment please, I'm connecting you to our representative.",
+        "transfer": "Please wait while I transfer your call to our representative.",
+        "sorry": "Sorry for the inconvenience. Thank you.",
+        "repeat": "I'm sorry, I didn't catch that. Are you {name} whose loan ID ends in {loan_suffix}?",
+    },
+    "hi-IN": {
+        "confirmation": "नमस्ते {name}, मैं बैंक से बोल रहा हूँ। क्या मैं {loan_suffix} पर समाप्त होने वाले लोन की {name} से बात कर रहा हूँ?",
+        "connecting": "कृपया एक क्षण रुकिए, मैं आपको हमारे प्रतिनिधि से जोड़ रहा हूँ।",
+        "transfer": "कृपया प्रतीक्षा करें, मैं आपको हमारे प्रतिनिधि से जोड़ रहा हूँ।",
+        "sorry": "क्षमा कीजिए। धन्यवाद।",
+        "repeat": "माफ़ कीजिएगा, स्पष्ट नहीं सुन पाया। क्या आप {loan_suffix} पर समाप्त होने वाले लोन की {name} हैं?",
+    },
+    "ta-IN": {
+        "confirmation": "வணக்கம் {name}. நாங்கள் வங்கியிலிருந்து பேசுகிறோம். கடன் எண் முடிவில் {loan_suffix} கொண்ட {name} அவர்களா பேசுவது?",
+        "connecting": "ஒரு நிமிடம், உங்களை எங்கள் பிரதிநிதருடன் இணைக்கிறேன்.",
+        "transfer": "தயவு செய்து காத்திருக்கவும், உங்களை எங்கள் பிரதிநிதரிடம் இணைக்கிறேன்.",
+        "sorry": "மன்னிக்கவும். நன்றி.",
+        "repeat": "மன்னிக்கவும், தெளிவாக கேட்கவில்லை. கடன் எண் முடிவில் {loan_suffix} கொண்ட {name} அவர்களா?",
+    },
+    "te-IN": {
+        "confirmation": "నమస్కారం {name} గారు, మా బ్యాంకు నుంచి మాట్లాడుతున్నాను. {loan_suffix}తో ముగిసే రుణానికి చెందిన {name} గారేనా?",
+        "connecting": "ఒక్క క్షణం వేచిచూడండి, మిమ్మల్ని మా ప్రతినిధితో కలుపుతున్నాను.",
+        "transfer": "దయచేసి వేచి ఉండండి, మిమ్మల్ని మా ప్రతినిధికి కలుపుతున్నాను.",
+        "sorry": "క్షమించండి. ధన్యవాదాలు.",
+        "repeat": "క్షమించండి, సరిగ్గా వినిపించలేదు. {loan_suffix}తో ముగిసే రుణానికి చెందిన {name} గారేనా?",
+    },
+    "ml-IN": {
+        "confirmation": "നമസ്കാരം {name}, ബാങ്കിൽ നിന്നാണ് വിളിക്കുന്നത്. വായ്പ നമ്പർ {loan_suffix} ആയ {name} ആണോ സംസാരിക്കുന്നത്?",
+        "connecting": "ഒരു നിമിഷം ദയവായി, നിങ്ങളെ നമ്മുടെ പ്രതിനിധിയുമായി ബന്ധിപ്പിക്കുന്നു.",
+        "transfer": "ദയവായി കാത്തിരിക്കൂ, നിങ്ങളെ നമ്മുടെ പ്രതിനിധിയിലേക്ക് ബന്ധിപ്പിക്കുന്നു.",
+        "sorry": "ക്ഷമിക്കണം. നന്ദി.",
+        "repeat": "ക്ഷമിക്കണം, വ്യക്തമായി കേൾക്കാനായില്ല. വായ്പ നമ്പർ {loan_suffix} ഉള്ള {name} ആണോ?",
+    },
+    "kn-IN": {
+        "confirmation": "ನಮಸ್ಕಾರ {name} ಸರ್/ಮೇಡಂ, ನಾವು ಬ್ಯಾಂಕಿನಿಂದ ಕರೆ ಮಾಡುತ್ತಿದ್ದೇವೆ. ಸಾಲ ಸಂಖ್ಯೆ {loan_suffix} ಅಂತ್ಯವಾಗಿರುವ {name} ಅವರೇನಾ?",
+        "connecting": "ಒಂದು ಕ್ಷಣ, ನಿಮಗೆ ನಮ್ಮ ಪ್ರತಿನಿಧಿಯನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇನೆ.",
+        "transfer": "ದಯವಿಟ್ಟು ಕ್ಷಣಕಾಲ ಕಾದಿರಿ, ನಿಮಗೆ ನಮ್ಮ ಪ್ರತಿನಿಧಿಯನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇನೆ.",
+        "sorry": "ಕ್ಷಮಿಸಿ. ಧನ್ಯವಾದಗಳು.",
+        "repeat": "ಕ್ಷಮಿಸಿ, ಸ್ಪಷ್ಟವಾಗಿ ಕೇಳಿಸಲಿಲ್ಲ. ಸಾಲ ಸಂಖ್ಯೆ {loan_suffix} ಹೊಂದಿರುವ {name} ಅವರೇನಾ?",
+    },
+    "bn-IN": {
+        "confirmation": "নমস্কার {name}, আমি ব্যাংক থেকে বলছি। {loan_suffix} নম্বরে শেষ হওয়া লোনের {name} এর সঙ্গেই কি কথা বলছি?",
+        "connecting": "একটু অপেক্ষা করুন, আপনাকে আমাদের প্রতিনিধির সাথে যুক্ত করছি।",
+        "transfer": "দয়া করে অপেক্ষা করুন, আপনাকে আমাদের প্রতিনিধির সাথে যুক্ত করছি।",
+        "sorry": "দুঃখিত। ধন্যবাদ।",
+        "repeat": "দুঃখিত, স্পষ্ট শুনতে পাইনি। {loan_suffix} নম্বরে শেষ হওয়া লোনের {name} কি আপনি?",
+    },
+    "mr-IN": {
+        "confirmation": "नमस्कार {name}, मी बँकेतून बोलत आहे. {loan_suffix} ने समाप्त होणाऱ्या कर्जाचे {name} आपण आहात का?",
+        "connecting": "कृपया एक क्षण थांबा, मी तुम्हाला आमच्या प्रतिनिधीशी जोडत आहे.",
+        "transfer": "कृपया प्रतीक्षा करा, मी तुम्हाला आमच्या प्रतिनिधीशी जोडत आहे.",
+        "sorry": "माफ करा. धन्यवाद.",
+        "repeat": "माफ करा, स्पष्ट ऐकू आले नाही. {loan_suffix} ने संपणाऱ्या कर्जाचे {name} आपण आहात का?",
+    },
+    "gu-IN": {
+        "confirmation": "નમસ્તે {name}, અમે બેંકમાંથી વાત કરી રહ્યા છીએ. {loan_suffix} પર સમાપ્ત થતો લોન ધરાવતા {name} સાથે જ હું વાત કરી રહ્યો છુંને?",
+        "connecting": "જોયું, હું તમને અમારા પ્રતિનિધિ સાથે જોડું છું.",
+        "transfer": "કૃપા કરીને રાહ જુઓ, હું તમને અમારા પ્રતિનિધિ સાથે જોડું છું.",
+        "sorry": "માફ કરશો. આભાર.",
+        "repeat": "માફ કરશો, મને સ્પષ્ટ સાંભળાયું નહીં. {loan_suffix} પર સમાપ્ત થતો લોન ધરાવતા {name} તમે જ છો ને?",
+    },
+    "pa-IN": {
+        "confirmation": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ {name} ਜੀ, ਅਸੀਂ ਬੈਂਕ ਤੋਂ ਗੱਲ ਕਰ ਰਹੇ ਹਾਂ। ਕੀ ਮੈਂ {loan_suffix} ਤੇ ਖਤਮ ਹੋਣ ਵਾਲੇ ਲੋਨ ਦੇ {name} ਨਾਲ ਹੀ ਗੱਲ ਕਰ ਰਿਹਾ ਹਾਂ?",
+        "connecting": "ਕਿਰਪਾ ਕਰਕੇ ਇਕ ਪਲ ਰੁੱਕੋ, ਮੈਂ ਤੁਹਾਨੂੰ ਸਾਡੇ ਨੁਮਾਇੰਦੇ ਨਾਲ ਜੋੜ ਰਿਹਾ ਹਾਂ।",
+        "transfer": "ਕਿਰਪਾ ਕਰਕੇ ਉਡੀਕ ਕਰੋ, ਮੈਂ ਤੁਹਾਨੂੰ ਸਾਡੇ ਨੁਮਾਇੰਦੇ ਨਾਲ ਜੋੜ ਰਿਹਾ ਹਾਂ।",
+        "sorry": "ਮਾਫ਼ ਕਰਨਾ। ਧੰਨਵਾਦ।",
+        "repeat": "ਮਾਫ਼ ਕੀਜੀਏ, ਠੀਕ ਨਾਲ ਸੁਣ ਨਹੀਂ ਸਕਿਆ। {loan_suffix} 'ਤੇ ਖਤਮ ਹੋਣ ਵਾਲੇ ਲੋਨ ਦੇ {name} ਤੁਸੀਂ ਹੋ?",
+    },
+    "od-IN": {
+        "confirmation": "ନମସ୍କାର {name}, ମୁଁ ବ୍ୟାଙ୍କରୁ କଥାହେଉଛି। {loan_suffix} ସହିତ ଶେଷ ହେଉଥିବା ଋଣର {name} ସହିତ କଥାହେଉଛି କି?",
+        "connecting": "ଦୟାକରି କିଛି ମୁହୂର୍ତ୍ତ ଅପେକ୍ଷା କରନ୍ତୁ, ମୁଁ ଆପଣଙ୍କୁ ଆମ ପ୍ରତିନିଧି ସହିତ ଯୋଡ଼ୁଛି।",
+        "transfer": "ଦୟାକରି ଅପେକ୍ଷା କରନ୍ତୁ, ମୁଁ ଆପଣଙ୍କୁ ଆମ ପ୍ରତିନିଧି ସହିତ ଯୋଡ଼ୁଛି।",
+        "sorry": "କ୍ଷମା କରନ୍ତୁ। ଧନ୍ୟବାଦ।",
+        "repeat": "କ୍ଷମା କରିବେ, ସ୍ପଷ୍ଟ ହେଉନି। {loan_suffix} ସହିତ ଶେଷ ହେଉଥିବା ଋଣର {name} ଆପଣ ତି?",
+    },
+}
+
+AFFIRMATIVE_RESPONSES = {
+    "en-IN": {"yes", "yeah", "yep", "sure", "ok", "okay", "alright", "yup", "of course", "absolutely"},
+    "hi-IN": {"हाँ", "हा", "हां", "जी", "जी हाँ", "ठीक", "चलो", "ठीक है", "haan", "haanji", "theek hai"},
+    "ta-IN": {"ஆம்", "ஆமாம்", "சரி", "ஹா", "ஆம", "ஆமடி", "sari", "amaam", "aam", "ama", "amma"},
+    "te-IN": {"అవును", "ఔను", "సరే", "హం", "అవునూ", "సరే బాగుంది", "avunu", "sare", "ounu"},
+    "ml-IN": {"അതെ", "ശരി", "ആണ്", "അതേ", "ഹൂം", "athe", "sheri", "aanu"},
+    "kn-IN": {"ಹೌದು", "ಹೌದ್ರಿ", "ಸರಿ", "ಹಾಂ", "ಹೌದ್", "haudu", "sari", "haudu"},
+    "bn-IN": {"হ্যাঁ", "হ্যা", "জি", "ঠিক আছে", "হঁ", "আচ্ছা", "thik ache"},
+    "mr-IN": {"हो", "होय", "चालेल", "ठीक", "हो ना", "होय होय", "chalel"},
+    "gu-IN": {"હા", "હાં", "સારું", "ચાલે", "બરાબર", "haa", "chal"},
+    "pa-IN": {"ਹਾਂ", "ਹਾਂ ਜੀ", "ਚੰਗਾ", "ਠੀਕ", "ਹਾਂਹ", "hanji", "theek aa"},
+    "od-IN": {"ହଁ", "ହାଁ", "ଠିକ", "ଠିକ୍ ଅଛି", "haa", "thik achhi"},
+}
+
+NEGATIVE_RESPONSES = {
+    "en-IN": {"no", "nah", "nope", "not now", "later", "don't", "do not", "never", "stop"},
+    "hi-IN": {"नहीं", "ना", "मत", "अभी नहीं", "नको", "नही", "nahi", "mat", "mana"},
+    "ta-IN": {"இல்லை", "வேண்டாம்", "இல்ல", "வேணாம்", "முடியாது", "illa", "vendam", "vendampaa"},
+    "te-IN": {"లేదు", "వద్దు", "అవసరం లేదు", "చేయను", "వద్ద", "ledu", "vaddu", "cheyanu"},
+    "ml-IN": {"ഇല്ല", "വേണ്ട", "വേണ്ടാ", "ചെയ്യില്ല", "illa", "vendam", "illada"},
+    "kn-IN": {"ಇಲ್ಲ", "ಬೇಡ", "ಬೇಡಾ", "ಮಾಡಲ್ಲ", "illa", "beda", "madalla"},
+    "bn-IN": {"না", "নাহ", "চাই না", "হবে না", "করব না", "na", "korbo na"},
+    "mr-IN": {"नाही", "नको", "चलणार नाही", "वेळ नाही", "नकोय", "nahi", "nako"},
+    "gu-IN": {"ના", "નથી", "નહિ", "નહી", "કરું નહીં", "na", "nathi"},
+    "pa-IN": {"ਨਹੀਂ", "ਨਾ", "ਹੋ ਸਕਦਾ ਨਹੀਂ", "ਨਹੀਂ ਜੀ", "ਨਾ ਜੀ", "nahi", "na"},
+    "od-IN": {"ନା", "ନାହିଁ", "ଚାହିଁ ନି", "କରିବି ନାହିଁ", "na", "nahi"},
+}
+
+def get_localized_prompt(key: str, language_code: str, **kwargs) -> str:
+    language = language_code or "en-IN"
+    prompts = LANGUAGE_PROMPTS.get(language, LANGUAGE_PROMPTS["en-IN"])
+    template = prompts.get(key, LANGUAGE_PROMPTS["en-IN"].get(key, ""))
+    return template.format(**kwargs)
+
 
 def get_initial_language_from_state(state: str) -> str:
     """Get the initial language based on customer's state."""
@@ -1311,7 +1441,8 @@ async def auth_session_status(request: Request):
     session = get_session(request)
     user = session.get("user")
     ttl = session.get_ttl()
-    remaining = ttl if isinstance(ttl, int) and ttl >= 0 else SESSION_MAX_AGE
+    session.extend_session()
+    remaining = session.get_ttl()
 
     if not user:
         return JSONResponse(
@@ -1550,8 +1681,19 @@ async def run_voice_session(
             info['amount'] = 'the outstanding amount'
         if not info.get('due_date'):
             info['due_date'] = 'the due date'
-        if not info.get('lang'):
-            info['lang'] = 'en-IN'
+        state_value = info.get('state')
+        preferred_lang = info.get('lang') or info.get('language_code')
+        if (not preferred_lang or preferred_lang == 'en-IN') and state_value:
+            derived = STATE_TO_LANGUAGE.get(state_value.strip().lower())
+            if derived:
+                preferred_lang = derived
+        if not preferred_lang:
+            state_value = info.get('state')
+            if state_value:
+                preferred_lang = STATE_TO_LANGUAGE.get(state_value.strip().lower())
+        if not preferred_lang:
+            preferred_lang = 'en-IN'
+        info['lang'] = preferred_lang
         return info
 
     def format_amount(value: Optional[str]) -> str:
@@ -1715,15 +1857,35 @@ async def run_voice_session(
         nonlocal conversation_stage, confirmation_attempts, claude_chat, current_language
 
         normalized = transcript.lower()
-        affirmative = {"yes", "yeah", "yep", "haan", "ha", "correct", "sure", "yup"}
-        negative = {"no", "nah", "nope", "nahi", "na"}
+        affirmative_words = AFFIRMATIVE_RESPONSES.get(current_language, AFFIRMATIVE_RESPONSES["en-IN"])
+        negative_words = NEGATIVE_RESPONSES.get(current_language, NEGATIVE_RESPONSES["en-IN"])
+        # Always allow English affirmations/negations as fallback
+        affirmative_words = affirmative_words | AFFIRMATIVE_RESPONSES["en-IN"]
+        negative_words = negative_words | NEGATIVE_RESPONSES["en-IN"]
 
-        is_affirmative = any(word in normalized for word in affirmative)
-        is_negative = any(word in normalized for word in negative)
+        token_list = re.findall(r"\w+", normalized)
+        original_tokens = re.findall(r"\w+", transcript.lower())
+
+        def contains_keywords(words: set[str]) -> bool:
+            for word in words:
+                if not word:
+                    continue
+                word_lower = word.lower()
+                if " " in word:
+                    if word_lower in normalized or word in transcript:
+                        return True
+                else:
+                    if word_lower in token_list or word_lower in original_tokens:
+                        return True
+                    if word in transcript:
+                        return True
+            return False
+
+        is_affirmative = contains_keywords(affirmative_words)
+        is_negative = contains_keywords(negative_words)
 
         if is_affirmative:
             logger.websocket.info("✅ Customer confirmed identity")
-            await play_connecting_prompt(websocket, current_language)
             conversation_stage = "CLAUDE_CHAT"
             confirmation_attempts = 0
             claude_chat = claude_chat_manager.start_session(call_sid, customer_info)
@@ -1731,9 +1893,13 @@ async def run_voice_session(
                 intro_prompt = (
                     "The caller is now on the line. Introduce yourself as Priya from Intalks NGN Bank, "
                     "briefly remind them about the overdue EMI amount of {amount}, and immediately ask "
-                    "for a concrete repayment date. Keep it under two short sentences and append a "
-                    "status tag [continue] at the end."
-                ).format(amount=format_amount(customer_info.get('amount')))
+                    "for a concrete repayment date. Respond entirely in {language_name} ({language_code}). "
+                    "Keep it under two short sentences and append a status tag [continue] at the end."
+                ).format(
+                    amount=format_amount(customer_info.get('amount')),
+                    language_name=LANGUAGE_DISPLAY_NAMES.get(current_language, "English"),
+                    language_code=current_language,
+                )
                 intro = await claude_reply(claude_chat, intro_prompt)
                 if intro:
                     intro_text, _ = parse_claude_response(intro)
@@ -1742,11 +1908,13 @@ async def run_voice_session(
                     if intro_text:
                         intro_language = detect_language(intro_text)
                         if intro_language and intro_language != current_language:
-                            logger.websocket.info(
-                                f"🌐 Switching assistant voice language {current_language} → {intro_language}"
-                            )
-                            current_language = intro_language
+                            if not (intro_language == "en-IN" and current_language != "en-IN"):
+                                logger.websocket.info(
+                                    f"🌐 Switching assistant voice language {current_language} → {intro_language}"
+                                )
+                                current_language = intro_language
                     await speak_text(intro_text, current_language)
+                await play_speak_now_prompt(websocket, current_language)
                 logger.websocket.info("🤖 Claude session established")
             else:
                 await speak_text("Our specialist is here. How can I assist you today?")
@@ -1754,13 +1922,13 @@ async def run_voice_session(
             return "affirmative"
         if is_negative:
             logger.websocket.info("ℹ️ Customer declined identity")
-            await play_sorry_prompt(websocket)
+            await play_sorry_prompt(websocket, current_language)
             conversation_stage = "GOODBYE_SENT"
             return "negative"
 
         confirmation_attempts += 1
         if confirmation_attempts >= 3:
-            await play_sorry_prompt(websocket)
+            await play_sorry_prompt(websocket, current_language)
             conversation_stage = "GOODBYE_SENT"
             return "negative"
         await play_repeat_prompt(websocket, customer_info)
@@ -1783,7 +1951,6 @@ async def run_voice_session(
         claude_turns += 1
 
         sentence_enders = {'.', '!', '?', '।', '！', '？'}
-        tag_pattern = re.compile(r"\[(?:continue|promise|escalate)\]", re.IGNORECASE)
         speech_queue: asyncio.Queue = asyncio.Queue()
         speech_closed = False
 
@@ -1794,7 +1961,9 @@ async def run_voice_session(
                     break
                 trimmed = sentence.strip()
                 if trimmed:
-                    await speak_text(trimmed, current_language)
+                    cleaned_sentence = STATUS_TAG_PATTERN.sub("", trimmed).strip()
+                    if cleaned_sentence:
+                        await speak_text(cleaned_sentence, current_language)
 
         async def finalize_speech_queue():
             nonlocal speech_closed
@@ -1825,7 +1994,7 @@ async def run_voice_session(
             nonlocal buffer
             if not chunk:
                 return
-            cleaned = tag_pattern.sub("", chunk)
+            cleaned = STATUS_TAG_PATTERN.sub("", chunk)
             if not cleaned:
                 return
             buffer += cleaned
@@ -1850,8 +2019,9 @@ async def run_voice_session(
             await speak_text("I didn't catch that. Could you please repeat?")
             return "continue"
 
-        agent_text, status = parse_claude_response(raw_reply)
-        cleaned_agent_text = (agent_text or "").strip()
+        cleaned_agent_text, status = parse_claude_response(raw_reply)
+        logger.websocket.info(f"🤖 Claude status={status} text='{cleaned_agent_text}'")
+        agent_text = cleaned_agent_text
         if status == "promise" and cleaned_agent_text.endswith("?"):
             logger.websocket.info("ℹ️ Ignoring [promise] tag because assistant response is a question")
             status = "continue"
@@ -1878,10 +2048,11 @@ async def run_voice_session(
         if cleaned_agent_text:
             detected_response_language = detect_language(cleaned_agent_text)
             if detected_response_language and detected_response_language != current_language:
-                logger.websocket.info(
-                    f"🌐 Switching assistant voice language {current_language} → {detected_response_language}"
-                )
-                current_language = detected_response_language
+                if not (detected_response_language == "en-IN" and current_language != "en-IN"):
+                    logger.websocket.info(
+                        f"🌐 Switching assistant voice language {current_language} → {detected_response_language}"
+                    )
+                    current_language = detected_response_language
 
         if allowed_to_escalate:
             logger.websocket.info(
