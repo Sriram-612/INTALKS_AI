@@ -10,6 +10,7 @@ import tempfile
 import io
 import os
 import json
+import math
 import httpx
 from typing import Optional, Dict, Tuple
 from pydub import AudioSegment
@@ -42,8 +43,21 @@ class ProductionSarvamHandler:
         # Audio buffering settings (more responsive)
         self.min_audio_duration = 1.0  # Minimum 1 second instead of 2
         self.max_audio_duration = 8.0  # Maximum 8 seconds to prevent memory issues
-        self.audio_quality_threshold = 500  # Lower threshold for better sensitivity
-        
+        self.audio_quality_threshold = int(os.getenv("SARVAM_AUDIO_QUALITY_THRESHOLD", "600"))
+        self.speech_energy_threshold_dbfs = float(os.getenv("SARVAM_STT_DBFS_THRESHOLD", "-65"))
+        self.speech_peak_margin_db = float(os.getenv("SARVAM_STT_PEAK_MARGIN", "12"))
+
+        # TTS shaping parameters from environment (fall back to natural defaults)
+        self.tts_pitch = float(os.getenv("SARVAM_TTS_PITCH", "1.0"))
+        self.tts_pace = float(os.getenv("SARVAM_TTS_PACE", "1.0"))
+        self.tts_loudness = float(os.getenv("SARVAM_TTS_LOUDNESS", "1.0"))
+        self.tts_sample_rate = int(os.getenv("SARVAM_TTS_SAMPLE_RATE", "22050"))
+        self.tts_highpass_hz = int(os.getenv("SARVAM_TTS_HIGHPASS_HZ", "0"))
+        self.tts_warm_lowpass_hz = int(os.getenv("SARVAM_TTS_WARM_LOWPASS_HZ", "0"))
+        self.tts_warm_gain_db = float(os.getenv("SARVAM_TTS_WARM_GAIN_DB", "0"))
+        self.tts_presence_highpass_hz = int(os.getenv("SARVAM_TTS_PRESENCE_HIGHPASS_HZ", "0"))
+        self.tts_presence_gain_db = float(os.getenv("SARVAM_TTS_PRESENCE_GAIN_DB", "0"))
+
         # Language code mapping for proper BCP-47 format
         self.language_map = {
             'en': 'en-IN',
@@ -87,6 +101,10 @@ class ProductionSarvamHandler:
                     self.voice_preferences[code] = fallback or self.indic_voice_default
         self.voice_preferences.setdefault('en-IN', self.default_voice)
 
+        self._supported_sample_rates = {8000, 16000, 22050, 24000}
+        if self.tts_sample_rate not in self._supported_sample_rates:
+            self.tts_sample_rate = 22050 if 22050 in self._supported_sample_rates else 16000
+
     def _select_voice(self, lang_code: str) -> str:
         """Return the most appropriate Sarvam speaker for the given language."""
         if not lang_code:
@@ -108,6 +126,28 @@ class ProductionSarvamHandler:
             return self.indic_voice_default
 
         return self.default_voice
+
+    def _apply_tts_post_processing(self, segment: AudioSegment) -> AudioSegment:
+        processed = segment
+
+        if self.tts_highpass_hz > 0:
+            processed = processed.high_pass_filter(self.tts_highpass_hz)
+
+        if self.tts_warm_lowpass_hz > 0:
+            warm = processed.low_pass_filter(self.tts_warm_lowpass_hz)
+            warm = warm.apply_gain(self.tts_warm_gain_db)
+            processed = warm
+
+        if self.tts_presence_highpass_hz > 0:
+            presence = processed.high_pass_filter(self.tts_presence_highpass_hz)
+            presence = presence.apply_gain(self.tts_presence_gain_db)
+            processed = processed.overlay(presence)
+
+        if self.tts_loudness != 1.0:
+            gain_db = 20 * math.log10(self.tts_loudness) if self.tts_loudness > 0 else 0
+            processed = processed.apply_gain(gain_db)
+
+        return processed
 
     def _normalize_language_code(self, lang: str) -> str:
         """Normalize language code to proper BCP-47 format"""
@@ -180,11 +220,28 @@ class ProductionSarvamHandler:
         """Check if audio has sufficient quality for transcription"""
         if len(audio_bytes) < self.audio_quality_threshold:
             return False
-        
+
         # Basic silence detection - check if audio has some variation
         if len(set(audio_bytes[:100])) < 5:  # Too uniform, likely silence
             return False
-        
+
+        try:
+            segment = AudioSegment.from_raw(
+                io.BytesIO(audio_bytes),
+                sample_width=2,
+                frame_rate=8000,
+                channels=1
+            )
+            average_db = segment.dBFS if segment.dBFS != float("-inf") else -120.0
+            peak_db = segment.max_dBFS if segment.max_dBFS != float("-inf") else average_db
+            if (
+                average_db < self.speech_energy_threshold_dbfs
+                and peak_db < (self.speech_energy_threshold_dbfs + self.speech_peak_margin_db)
+            ):
+                return False
+        except Exception:
+            pass
+
         return True
 
     async def detect_language_from_text(self, text: str) -> str:
@@ -343,10 +400,10 @@ class ProductionSarvamHandler:
                 target_language_code=lang_code,
                 model="bulbul:v2",
                 speaker=self._select_voice(lang_code),  # Compatible speaker for bulbul:v2
-                pitch=1.0,        # Natural pitch
-                pace=1.0,         # Natural speaking pace
-                loudness=1.0,     # Natural volume
-                speech_sample_rate=8000, # Optimized for telephony (correct parameter name)
+                pitch=self.tts_pitch,
+                pace=self.tts_pace,
+                loudness=self.tts_loudness,
+                speech_sample_rate=self.tts_sample_rate,
                 enable_preprocessing=True  # Better handling of mixed content
             )
             
@@ -380,7 +437,9 @@ class ProductionSarvamHandler:
                         audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
                         logger.tts.info(f"📊 Direct audio loaded: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
                         
-                        # Convert to SLIN format (8kHz, mono, 16-bit)
+                        # Apply requested shaping then convert to telephony format
+                        audio_segment = audio_segment.set_frame_rate(self.tts_sample_rate)
+                        audio_segment = self._apply_tts_post_processing(audio_segment)
                         slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
                         final_bytes = slin_audio.raw_data
                         
@@ -412,6 +471,8 @@ class ProductionSarvamHandler:
                             audio_segment = AudioSegment.from_wav(temp_file_path)
                             logger.tts.info(f"📊 WAV audio loaded: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch, {len(audio_segment)}ms")
                         
+                        audio_segment = audio_segment.set_frame_rate(self.tts_sample_rate)
+                        audio_segment = self._apply_tts_post_processing(audio_segment)
                         # Convert to SLIN format
                         slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
                         final_bytes = slin_audio.raw_data
@@ -512,6 +573,10 @@ class ProductionSarvamHandler:
                 target_language_code=normalized_lang,
                 speaker=self._select_voice(normalized_lang),  # Compatible speaker for bulbul:v2
                 model="bulbul:v2",
+                pitch=self.tts_pitch,
+                pace=self.tts_pace,
+                loudness=self.tts_loudness,
+                speech_sample_rate=self.tts_sample_rate,
                 enable_preprocessing=True
             )
             
@@ -532,6 +597,8 @@ class ProductionSarvamHandler:
                     # It's MP3 format, convert to PCM
                     try:
                         audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+                        audio_segment = audio_segment.set_frame_rate(self.tts_sample_rate)
+                        audio_segment = self._apply_tts_post_processing(audio_segment)
                         slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
                         raw_pcm = slin_audio.raw_data
                         logger.tts.info(f"✅ MP3 converted to PCM: {len(raw_pcm)} bytes")
@@ -546,6 +613,8 @@ class ProductionSarvamHandler:
                     # It's WAV format, convert to PCM
                     try:
                         audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format="wav")
+                        audio_segment = audio_segment.set_frame_rate(self.tts_sample_rate)
+                        audio_segment = self._apply_tts_post_processing(audio_segment)
                         slin_audio = audio_segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
                         raw_pcm = slin_audio.raw_data
                         logger.tts.info(f"✅ WAV converted to PCM: {len(raw_pcm)} bytes")

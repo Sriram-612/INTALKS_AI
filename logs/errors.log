@@ -889,3 +889,21 @@ Please retry in 27.870764545s. [violations {
 2025-10-23 22:10:23 | ERROR    | voice_assistant.errors | run_voice_session:1671 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
 2025-10-23 22:18:16 | ERROR    | voice_assistant.errors | run_voice_session:1658 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
 2025-10-23 22:18:17 | ERROR    | voice_assistant.errors | run_voice_session:1671 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-24 23:45:30 | ERROR    | voice_assistant.errors | claude_reply:454 | ❌ Claude reply failed: Claude converse_stream error: Parameter validation failed:
+Invalid number of parameters set for tagged union structure messages[0].content[0]. Can only set one of the following keys: text, image, document, video, toolUse, toolResult, guardContent, cachePoint, reasoningContent, citationsContent.
+Unknown parameter in messages[0].content[0]: "type", must be one of: text, image, document, video, toolUse, toolResult, guardContent, cachePoint, reasoningContent, citationsContent
+2025-10-24 23:45:47 | ERROR    | voice_assistant.errors | run_voice_session:2027 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-24 23:45:48 | ERROR    | voice_assistant.errors | run_voice_session:2040 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-25 00:12:29 | ERROR    | voice_assistant.errors | run_voice_session:2026 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-25 00:12:30 | ERROR    | voice_assistant.errors | run_voice_session:2039 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-25 00:25:44 | ERROR    | voice_assistant.errors | run_voice_session:2026 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-25 00:29:20 | ERROR    | voice_assistant.errors | run_voice_session:2026 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-25 00:29:21 | ERROR    | voice_assistant.errors | run_voice_session:2039 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-25 08:23:52 | ERROR    | voice_assistant.errors | run_voice_session:2204 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-25 08:23:53 | ERROR    | voice_assistant.errors | run_voice_session:2217 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-25 09:28:21 | ERROR    | voice_assistant.errors | run_voice_session:2206 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-25 09:28:22 | ERROR    | voice_assistant.errors | run_voice_session:2219 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-25 09:40:47 | ERROR    | voice_assistant.errors | run_voice_session:2206 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-25 09:40:48 | ERROR    | voice_assistant.errors | run_voice_session:2219 | Error closing WebSocket: Cannot call "send" once a close message has been sent.
+2025-10-25 09:45:29 | ERROR    | voice_assistant.errors | run_voice_session:2206 | WebSocket error: WebSocket is not connected. Need to call "accept" first.
+2025-10-25 09:45:30 | ERROR    | voice_assistant.errors | run_voice_session:2219 | Error closing WebSocket: Cannot call "send" once a close message has been sent.

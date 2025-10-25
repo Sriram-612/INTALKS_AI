@@ -5074,3 +5074,69 @@
 2025-10-23 22:18:14 | INFO     | voice_assistant.calls | flush:442 | [TRANSCRIPT] CallSid=447143957fd53d9832e65ee6200b19an | [Claude] Hello Mr. Jagan Prasath, this is Priya from Intalks NGN Bank calling about your overdue EMI of ₹2,500,000 for loan LOAN005. When can we expect your payment?
 2025-10-23 22:18:16 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 447143957fd53d9832e65ee6200b19an
 2025-10-23 22:18:17 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 447143957fd53d9832e65ee6200b19an
+2025-10-24 23:45:15 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=65dbf0ca1e53902b7fd1d60a4f6819ao | இது வந்து அமிர்தம்.
+2025-10-24 23:45:27 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=65dbf0ca1e53902b7fd1d60a4f6819ao | Yes.
+2025-10-24 23:45:35 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=65dbf0ca1e53902b7fd1d60a4f6819ao | சரிங்க அண்ணா நான் வந்து பேசாம இருக்கேன்.
+2025-10-24 23:45:43 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=65dbf0ca1e53902b7fd1d60a4f6819ao | What?
+2025-10-24 23:45:47 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 65dbf0ca1e53902b7fd1d60a4f6819ao
+2025-10-24 23:45:48 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 65dbf0ca1e53902b7fd1d60a4f6819ao
+2025-10-25 00:12:29 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 0197802486637cf3b821568c6dca19ap
+2025-10-25 00:12:30 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 0197802486637cf3b821568c6dca19ap
+2025-10-25 00:25:44 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 510ca3c7b8a0f0985ca0fa8e707e19ap
+2025-10-25 00:29:20 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 39f9040b55fbc90bdcdeaa95440c19ap
+2025-10-25 00:29:21 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 39f9040b55fbc90bdcdeaa95440c19ap
+2025-10-25 07:08:18 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=d4ecde56b9e7b44f00d1e5b2ecd819ap | Yes, you are.
+2025-10-25 07:08:24 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=d4ecde56b9e7b44f00d1e5b2ecd819ap | [Claude] Hello Mr. Jagan Prasath, this is Priya from Intalks NGN Bank. Your EMI of ₹2,500,000 for loan LOAN005 is overdue - when can we expect your payment?
+2025-10-25 07:08:42 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=d4ecde56b9e7b44f00d1e5b2ecd819ap | I won't be able to make it.
+2025-10-25 07:08:57 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=d4ecde56b9e7b44f00d1e5b2ecd819ap | [Claude_raw] I understand things might be difficult right now, Mr. Jagan. Could you share when you might be able to make at least a partial payment of the amount? [continue]
+2025-10-25 07:08:57 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=d4ecde56b9e7b44f00d1e5b2ecd819ap | [Claude] I understand things might be difficult right now, Mr. Jagan. Could you share when you might be able to make at least a partial payment of the amount?
+2025-10-25 07:09:01 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=d4ecde56b9e7b44f00d1e5b2ecd819ap | சொல்ல முடியாது.
+2025-10-25 07:09:14 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=d4ecde56b9e7b44f00d1e5b2ecd819ap | [Claude_raw] நான் புரிஞ்சுக்கறேன் ஜகன் சார், ஆனா இந்த பேமெண்ட் ரொம்ப முக்கியம். எப்போ கொஞ்சமாவது பணம் கட்ட முடியும்னு சொல்ல முடியுமா? [continue]
+2025-10-25 07:09:14 | INFO     | voice_assistant.calls | flush:607 | [TRANSCRIPT] CallSid=d4ecde56b9e7b44f00d1e5b2ecd819ap | [Claude] நான் புரிஞ்சுக்கறேன் ஜகன் சார், ஆனா இந்த பேமெண்ட் ரொம்ப முக்கியம். எப்போ கொஞ்சமாவது பணம் கட்ட முடியும்னு சொல்ல முடியுமா?
+2025-10-25 07:09:21 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: d4ecde56b9e7b44f00d1e5b2ecd819ap
+2025-10-25 07:29:59 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: a4964223dc4504f0d40528caeaf919ap
+2025-10-25 07:39:51 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | ஆமாங்க
+2025-10-25 07:39:59 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | [Claude] வணக்கம் ஜகன் பிரசாத், நான் இன்டாக்ஸ் NGN வங்கியிலிருந்து பிரியா பேசுறேன். உங்களுடைய ₹2,500,000 EMI தவணை தாமதமாகியுள்ளது, எப்போது பணம் செலுத்த முடியும்னு சொல்ல முடியுமா?
+2025-10-25 07:40:18 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | என்னால இப்ப செலுத்த முடியாதுங்க.
+2025-10-25 07:40:31 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | [Claude_raw] பரவாயில்ல ஜகன், உங்க நிலைமையை புரிஞ்சுக்கிறேன். அடுத்த வாரம் அல்லது அடுத்த மாசம் முதல் தேதி கூட செலுத்த முடியுமா? [continue]
+2025-10-25 07:40:31 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | [Claude] பரவாயில்ல ஜகன், உங்க நிலைமையை புரிஞ்சுக்கிறேன். அடுத்த வாரம் அல்லது அடுத்த மாசம் முதல் தேதி கூட செலுத்த முடியுமா?
+2025-10-25 07:40:34 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | முடியாதுங்க
+2025-10-25 07:40:45 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | [Claude_raw] சரி ஜகன், உங்களுக்கு எப்போது வசதியா இருக்கும்னு சொல்லுங்க? நாங்க உங்களுக்கு உதவ விரும்புறோம். [continue]
+2025-10-25 07:40:45 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | [Claude] சரி ஜகன், உங்களுக்கு எப்போது வசதியா இருக்கும்னு சொல்லுங்க? நாங்க உங்களுக்கு உதவ விரும்புறோம்.
+2025-10-25 07:40:49 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | முடியாது. இன்னும் ஒரு பத்து நாளைக்கு மேல வேணும். இன்னும் ஒரு
+2025-10-25 07:41:01 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | [Claude_raw] பரவாயில்ல ஜகன், பத்து நாட்களுக்கு மேல கொடுக்கறது பரவாயில்ல. சரியா 15 நாட்களுக்குள்ள செலுத்த முடியுமா? [continue]
+2025-10-25 07:41:01 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | [Claude] பரவாயில்ல ஜகன், பத்து நாட்களுக்கு மேல கொடுக்கறது பரவாயில்ல. சரியா 15 நாட்களுக்குள்ள செலுத்த முடியுமா?
+2025-10-25 07:41:05 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | பத்து நாள் சரி பண்ண முடியும்
+2025-10-25 07:41:18 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | [Claude_raw] நன்றி ஜகன், அப்படின்னா 10 நாட்களுக்குள்ள நீங்க பணம் செலுத்துவீங்கன்னு நான் குறிச்சுக்கறேன். உங்க வாக்குறுதிக்கு நன்றி. [promise]
+2025-10-25 07:41:18 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=b2f482fc6a261775ad18bb79c4f819ap | [Claude] நன்றி ஜகன், அப்படின்னா 10 நாட்களுக்குள்ள நீங்க பணம் செலுத்துவீங்கன்னு நான் குறிச்சுக்கறேன். உங்க வாக்குறுதிக்கு நன்றி.
+2025-10-25 07:41:37 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: b2f482fc6a261775ad18bb79c4f819ap
+2025-10-25 07:45:12 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 1492ba33c93b7123497919044d0519ap
+2025-10-25 08:10:15 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=172fb57849c584fc95491dacfb2f19ap | ஆமா
+2025-10-25 08:10:23 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=172fb57849c584fc95491dacfb2f19ap | [Claude] வணக்கம் ஜகன் பிரசாத், நான் இன்டாக்ஸ் NGN வங்கியிலிருந்து பிரியா பேசுறேன். உங்கள் ₹2,500,000 EMI தவணை தாமதமாகியுள்ளது, எப்போது பணம் செலுத்த முடியும்னு சொல்லுங்க?
+2025-10-25 08:10:41 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=172fb57849c584fc95491dacfb2f19ap | இன்னும் பத்து நாள் ஆகும்.
+2025-10-25 08:10:52 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=172fb57849c584fc95491dacfb2f19ap | [Claude_raw] பத்து நாட்கள்னா அடுத்த வாரம் வெள்ளிக்கிழமை போல இருக்கும். அந்த தேதியை உறுதி செய்து கொள்ளலாமா? [continue]
+2025-10-25 08:10:52 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=172fb57849c584fc95491dacfb2f19ap | [Claude] பத்து நாட்கள்னா அடுத்த வாரம் வெள்ளிக்கிழமை போல இருக்கும். அந்த தேதியை உறுதி செய்து கொள்ளலாமா?
+2025-10-25 08:10:55 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=172fb57849c584fc95491dacfb2f19ap | சரிங்க.
+2025-10-25 08:11:05 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=172fb57849c584fc95491dacfb2f19ap | [Claude_raw] வெள்ளிக்கிழமை ₹2,500,000 செலுத்துவதை உறுதி செய்கிறீங்களா? நன்றி ஜகன் பிரசாத். [promise]
+2025-10-25 08:11:05 | INFO     | voice_assistant.calls | flush:618 | [TRANSCRIPT] CallSid=172fb57849c584fc95491dacfb2f19ap | [Claude] வெள்ளிக்கிழமை ₹2,500,000 செலுத்துவதை உறுதி செய்கிறீங்களா? நன்றி ஜகன் பிரசாத்.
+2025-10-25 08:11:18 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 172fb57849c584fc95491dacfb2f19ap
+2025-10-25 08:16:28 | INFO     | voice_assistant.calls | flush:617 | [TRANSCRIPT] CallSid=c5315068c255304528a66cb90f3e19ap | ஆமா
+2025-10-25 08:16:36 | INFO     | voice_assistant.calls | flush:617 | [TRANSCRIPT] CallSid=c5315068c255304528a66cb90f3e19ap | [Claude] வணக்கம் ஜகன் பிரசாத், நான் இன்டாக்ஸ் NGN வங்கியில் இருந்து பிரியா பேசுறேன். உங்கள் ₹2,500,000 EMI தவணை தாமதமாகியுள்ளது, எப்போது பணம் செலுத்த முடியும்னு சொல்லுங்க?
+2025-10-25 08:16:54 | INFO     | voice_assistant.calls | flush:617 | [TRANSCRIPT] CallSid=c5315068c255304528a66cb90f3e19ap | இன்னும் இருவது நாள் மேல ஆகும்.
+2025-10-25 08:17:04 | INFO     | voice_assistant.calls | flush:617 | [TRANSCRIPT] CallSid=c5315068c255304528a66cb90f3e19ap | [Claude_raw] இருபது நாட்கள் கொஞ்சம் அதிகமா இருக்கு ஜகன். இந்த வாரத்துல செலுத்த முடியுமா? [continue]
+2025-10-25 08:17:04 | INFO     | voice_assistant.calls | flush:617 | [TRANSCRIPT] CallSid=c5315068c255304528a66cb90f3e19ap | [Claude] இருபது நாட்கள் கொஞ்சம் அதிகமா இருக்கு ஜகன். இந்த வாரத்துல செலுத்த முடியுமா?
+2025-10-25 08:17:06 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: c5315068c255304528a66cb90f3e19ap
+2025-10-25 08:20:27 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: a9d9beac6cca5be0bc84468e97b019ap
+2025-10-25 08:23:42 | INFO     | voice_assistant.calls | flush:617 | [TRANSCRIPT] CallSid=8c961adf3e180f96322e029f3ab619ap | जी हां।
+2025-10-25 08:23:50 | INFO     | voice_assistant.calls | flush:617 | [TRANSCRIPT] CallSid=8c961adf3e180f96322e029f3ab619ap | [Claude] नमस्ते जगन प्रसाथ जी, मैं प्रिया इनटॉक्स एनजीएन बैंक से बात कर रही हूँ। आपका ₹2,500,000 का ईएमआई बकाया है, आप कब तक इसका भुगतान कर पाएंगे?
+2025-10-25 08:23:52 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 8c961adf3e180f96322e029f3ab619ap
+2025-10-25 08:23:53 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 8c961adf3e180f96322e029f3ab619ap
+2025-10-25 09:26:07 | INFO     | voice_assistant.calls | flush:617 | [TRANSCRIPT] CallSid=b27b91fa499702b7c3e8d63d9fba19ap | Yes.
+2025-10-25 09:27:48 | INFO     | voice_assistant.calls | flush:617 | [TRANSCRIPT] CallSid=237d6bcf710f628eba09fd7f1e3319ap | जी हां।
+2025-10-25 09:27:59 | INFO     | voice_assistant.calls | flush:617 | [TRANSCRIPT] CallSid=237d6bcf710f628eba09fd7f1e3319ap | [Claude] नमस्ते जगन प्रसाथ जी, मैं प्रिया इनटॉक्स एनजीएन बैंक से बात कर रही हूं। आपका ईएमआई ₹2,500,000 अभी बकाया है, आप कब तक इसका भुगतान कर पाएंगे?
+2025-10-25 09:28:21 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 237d6bcf710f628eba09fd7f1e3319ap
+2025-10-25 09:28:22 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 237d6bcf710f628eba09fd7f1e3319ap
+2025-10-25 09:40:47 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: 5009aa0c8c1064cd3ca4f8c0a0fd19ap
+2025-10-25 09:40:48 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: 5009aa0c8c1064cd3ca4f8c0a0fd19ap
+2025-10-25 09:45:29 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_ERROR - CallSid: a39cdc163e1379aab65cba48daea19ap
+2025-10-25 09:45:30 | INFO     | voice_assistant.calls | log_call_event:229 | [CALL] WEBSOCKET_CLOSED_GRACEFUL - CallSid: a39cdc163e1379aab65cba48daea19ap

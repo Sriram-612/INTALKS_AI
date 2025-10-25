@@ -2355,3 +2355,47 @@
 2025-10-23 22:10:24 | INFO     | voice_assistant.database | status_callback:3038 | ℹ️ CallSid=deb34509127ed06d6a97c3355fca19an already terminal (call_completed), skipping
 2025-10-23 22:17:40 | INFO     | voice_assistant.database | lifespan:99 | Database connection established
 2025-10-23 22:17:57 | INFO     | voice_assistant.database | handle_passthru:1145 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid 447143957fd53d9832e65ee6200b19an
+2025-10-24 23:44:30 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-24 23:45:01 | INFO     | voice_assistant.database | handle_passthru:1451 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid 65dbf0ca1e53902b7fd1d60a4f6819ao
+2025-10-24 23:59:15 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 00:10:58 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 00:11:26 | INFO     | voice_assistant.database | handle_passthru:1450 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid 0197802486637cf3b821568c6dca19ap
+2025-10-25 00:12:33 | INFO     | voice_assistant.database | status_callback:3406 | ℹ️ CallSid=0197802486637cf3b821568c6dca19ap already terminal (call_completed), skipping
+2025-10-25 00:24:16 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 00:24:41 | INFO     | voice_assistant.database | handle_passthru:1450 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid 510ca3c7b8a0f0985ca0fa8e707e19ap
+2025-10-25 00:27:57 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 00:28:17 | INFO     | voice_assistant.database | handle_passthru:1450 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid 39f9040b55fbc90bdcdeaa95440c19ap
+2025-10-25 07:07:18 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 07:08:02 | INFO     | voice_assistant.database | handle_passthru:1450 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid d4ecde56b9e7b44f00d1e5b2ecd819ap
+2025-10-25 07:09:23 | INFO     | voice_assistant.database | status_callback:3406 | ℹ️ CallSid=d4ecde56b9e7b44f00d1e5b2ecd819ap already terminal (call_completed), skipping
+2025-10-25 07:29:05 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 07:29:36 | INFO     | voice_assistant.database | handle_passthru:1587 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid a4964223dc4504f0d40528caeaf919ap
+2025-10-25 07:30:00 | INFO     | voice_assistant.database | status_callback:3572 | ℹ️ CallSid=a4964223dc4504f0d40528caeaf919ap already terminal (call_completed), skipping
+2025-10-25 07:39:15 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 07:39:37 | INFO     | voice_assistant.database | handle_passthru:1587 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid b2f482fc6a261775ad18bb79c4f819ap
+2025-10-25 07:44:24 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 07:44:50 | INFO     | voice_assistant.database | handle_passthru:1587 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid 1492ba33c93b7123497919044d0519ap
+2025-10-25 07:45:15 | INFO     | voice_assistant.database | status_callback:3581 | ℹ️ CallSid=1492ba33c93b7123497919044d0519ap already terminal (call_completed), skipping
+2025-10-25 07:58:18 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 08:00:57 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 08:02:52 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 08:09:33 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 08:10:01 | INFO     | voice_assistant.database | handle_passthru:1588 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid 172fb57849c584fc95491dacfb2f19ap
+2025-10-25 08:15:24 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 08:16:15 | INFO     | voice_assistant.database | handle_passthru:1589 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid c5315068c255304528a66cb90f3e19ap
+2025-10-25 08:17:08 | INFO     | voice_assistant.database | status_callback:3582 | ℹ️ CallSid=c5315068c255304528a66cb90f3e19ap already terminal (call_completed), skipping
+2025-10-25 08:19:20 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 08:19:56 | INFO     | voice_assistant.database | handle_passthru:1589 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid a9d9beac6cca5be0bc84468e97b019ap
+2025-10-25 08:20:28 | INFO     | voice_assistant.database | status_callback:3582 | ℹ️ CallSid=a9d9beac6cca5be0bc84468e97b019ap already terminal (call_completed), skipping
+2025-10-25 08:22:53 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 08:23:25 | INFO     | voice_assistant.database | handle_passthru:1591 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid 8c961adf3e180f96322e029f3ab619ap
+2025-10-25 09:22:28 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 09:23:16 | INFO     | voice_assistant.database | handle_passthru:1591 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid b9b0e5350d5ece601dff585840c519ap
+2025-10-25 09:24:29 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 09:25:42 | INFO     | voice_assistant.database | handle_passthru:1591 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid b27b91fa499702b7c3e8d63d9fba19ap
+2025-10-25 09:26:40 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 09:27:31 | INFO     | voice_assistant.database | handle_passthru:1591 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid 237d6bcf710f628eba09fd7f1e3319ap
+2025-10-25 09:37:02 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 09:40:19 | INFO     | voice_assistant.database | handle_passthru:1591 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid 5009aa0c8c1064cd3ca4f8c0a0fd19ap
+2025-10-25 09:44:33 | INFO     | voice_assistant.database | lifespan:102 | Database connection established
+2025-10-25 09:45:19 | INFO     | voice_assistant.database | handle_passthru:1591 | ✅ Passthru: DB updated to IN_PROGRESS for CallSid a39cdc163e1379aab65cba48daea19ap

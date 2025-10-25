@@ -25,6 +25,63 @@ from utils.handler_asr import SarvamHandler
 
 load_dotenv()
 
+STATE_TO_LANGUAGE = {
+    'andhra pradesh': 'te-IN',
+    'arunachal pradesh': 'hi-IN',
+    'assam': 'hi-IN',
+    'bihar': 'hi-IN',
+    'chhattisgarh': 'hi-IN',
+    'goa': 'hi-IN',
+    'gujarat': 'gu-IN',
+    'haryana': 'hi-IN',
+    'himachal pradesh': 'hi-IN',
+    'jharkhand': 'hi-IN',
+    'karnataka': 'kn-IN',
+    'kerala': 'ml-IN',
+    'madhya pradesh': 'hi-IN',
+    'maharashtra': 'mr-IN',
+    'manipur': 'hi-IN',
+    'meghalaya': 'hi-IN',
+    'mizoram': 'hi-IN',
+    'nagaland': 'hi-IN',
+    'odisha': 'od-IN',
+    'orissa': 'od-IN',
+    'punjab': 'pa-IN',
+    'rajasthan': 'hi-IN',
+    'sikkim': 'hi-IN',
+    'tamil nadu': 'ta-IN',
+    'tamilnadu': 'ta-IN',
+    'tn': 'ta-IN',
+    'telangana': 'te-IN',
+    'tripura': 'hi-IN',
+    'uttar pradesh': 'hi-IN',
+    'uttarakhand': 'hi-IN',
+    'west bengal': 'bn-IN',
+    'bengal': 'bn-IN',
+    'delhi': 'hi-IN',
+    'new delhi': 'hi-IN',
+    'delhi ncr': 'hi-IN',
+    'puducherry': 'ta-IN',
+    'pondicherry': 'ta-IN',
+    'chandigarh': 'hi-IN',
+    'andaman and nicobar islands': 'hi-IN',
+    'dadra and nagar haveli and daman and diu': 'hi-IN',
+    'daman and diu': 'hi-IN',
+    'jammu and kashmir': 'hi-IN',
+    'ladakh': 'hi-IN',
+    'lakshadweep': 'ml-IN',
+}
+
+def derive_language_code(customer) -> str:
+    if getattr(customer, "language_code", None):
+        return customer.language_code
+    state_value = getattr(customer, "state", None)
+    if state_value:
+        key = state_value.strip().lower()
+        if key in STATE_TO_LANGUAGE:
+            return STATE_TO_LANGUAGE[key]
+    return 'en-IN'
+
 class CallManagementService:
     def __init__(self):
         self.db_manager = db_manager
@@ -93,6 +150,7 @@ class CallManagementService:
             # Get the primary loan for this customer
             loan = customer.loans[0] if customer.loans else None
             
+            language_code = derive_language_code(customer)
             customer_data = {
                 'id': str(customer.id),
                 'name': customer.full_name,
@@ -101,7 +159,8 @@ class CallManagementService:
                 'loan_id': loan.loan_id if loan else 'N/A',
                 'amount': float(loan.outstanding_amount) if loan and loan.outstanding_amount else 0,
                 'due_date': loan.next_due_date.isoformat() if loan and loan.next_due_date else None,
-                'language_code': 'en-IN',  # Default language
+                'language_code': language_code,
+                'lang': language_code,
                 'temp_call_id': temp_call_id
             }
             

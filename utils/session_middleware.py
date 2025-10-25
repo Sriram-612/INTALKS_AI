@@ -179,6 +179,26 @@ class SessionDict:
             except Exception as e:
                 print(f"Error immediately saving session {self.session_id}: {e}")
 
+    def extend_session(self, new_max_age: Optional[int] = None):
+        """Extend the session TTL without modifying data."""
+        if not self.redis_client:
+            return
+        ttl_value = new_max_age or self.max_age
+        try:
+            self.redis_client.expire(f"session:{self.session_id}", ttl_value)
+        except Exception as e:
+            print(f"Error extending session {self.session_id}: {e}")
+
+    def get_ttl(self) -> int:
+        if not self.redis_client:
+            return self.max_age
+        try:
+            ttl = self.redis_client.ttl(f"session:{self.session_id}")
+            return ttl if ttl is not None and ttl >= 0 else self.max_age
+        except Exception as e:
+            print(f"Error getting TTL for session {self.session_id}: {e}")
+            return self.max_age
+
 
 def get_session(request: Request) -> SessionDict:
     """Get session from request"""
