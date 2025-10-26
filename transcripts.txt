@@ -1,7 +1,0 @@
-
-=== Call d8ddc102cef8f8a3fe04be0185d019ao | Started 2025-10-24T17:36:14.024387 | Customer: Jagan Prasath J | Phone: +919940430392 ===
-2025-10-24T17:36:14.025673 | Yes.
-
-=== Call 078632062e4f044c7814ced790ab19ao | Started 2025-10-24T17:37:37.362115 | Customer: Jagan Prasath J | Phone: +919940430392 ===
-2025-10-24T17:37:37.363196 | ठीक है।
-2025-10-24T17:37:57.784209 | Yes.

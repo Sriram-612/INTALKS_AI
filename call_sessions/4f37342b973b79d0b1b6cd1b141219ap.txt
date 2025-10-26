@@ -1,0 +1,10 @@
+
+=== Call 4f37342b973b79d0b1b6cd1b141219ap | Started 2025-10-25T17:40:38.573254 | Customer: Jagan Prasath J | Phone: +919940430392 ===
+2025-10-25T17:40:38.574281 | जी हां।
+2025-10-25T17:40:42.265704 | [Claude] नमस्ते जगन प्रसाद जी, मैं प्रिया साउथ इंडिया फिनवेस्ट बैंक से बात कर रही हूँ। आपका ₹2,500,000 का ईएमआई बकाया है, आप कब तक इसका भुगतान कर पाएंगे?
+2025-10-25T17:41:00.300954 | இப்ப பண்ண முடியாதுங்க.
+2025-10-25T17:41:12.139493 | [Claude_raw] அது சரி, ஆனா இந்த தொகையை எப்போ கட்ட முடியும்னு சொல்லுங்க? உங்களோட கடன் நிலுவை தொகை அதிகமாகிக்கொண்டே போகுது. [continue]
+2025-10-25T17:41:12.279722 | [Claude] அது சரி, ஆனா இந்த தொகையை எப்போ கட்ட முடியும்னு சொல்லுங்க? உங்களோட கடன் நிலுவை தொகை அதிகமாகிக்கொண்டே போகுது.
+2025-10-25T17:41:16.069353 | Okay.
+2025-10-25T17:41:23.608716 | [Claude_raw] Thank you, but I need a specific date when you can make the payment of ₹2,500,000. When exactly can you clear this overdue EMI amount? [continue]
+2025-10-25T17:41:23.750320 | [Claude] Thank you, but I need a specific date when you can make the payment of ₹2,500,000. When exactly can you clear this overdue EMI amount?

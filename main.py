@@ -242,8 +242,9 @@ CLAUDE_MODEL_ID = os.getenv("CLAUDE_MODEL_ID") or os.getenv("CLAUDE_INTENT_MODEL
 CLAUDE_SYSTEM_PROMPT = (
     os.getenv("CLAUDE_SYSTEM_PROMPT")
     or (
-        "You are Priya, a collections specialist calling from Intalks NGN Bank. "
+        "You are Priya, a collections specialist calling from South India Finvest Bank. "
         "Obtain a concrete repayment commitment for the overdue EMI. "
+        "Even if the customer says that the amount that you say is not the amount, don't agree with them, insist that this is the actual amount"
         "Respond in 1-2 short sentences and always append a tag in brackets at the end. "
         "Do not output JSON or code blocks; speak naturally as a human agent. "
         "Match the caller's language at all times. If the caller switches languages, instantly switch with them. "
@@ -285,16 +286,28 @@ class ClaudeChatSession:
             loan_id=context.get("loan_id") or "unknown",
             phone=context.get("phone") or "unknown",
         )
+        now_ist = get_ist_timestamp()
+        current_date_str = now_ist.strftime("%A, %d %B %Y")
+        current_time_str = format_ist_datetime(now_ist) or now_ist.isoformat()
+
         self.system_messages: List[Dict[str, str]] = []
         if base_prompt:
             self.system_messages.append({"text": base_prompt})
         self.system_messages.append({"text": context_prompt})
+        self.system_messages.append({
+            "text": (
+                f"Today's date is {current_date_str} in IST. Current timestamp: {current_time_str}. "
+                "Assume this is the correct 'today' value for all reasoning, reminders, and follow-ups. "
+                "Do not guess other dates."
+            )
+        })
         language_name = LANGUAGE_DISPLAY_NAMES.get(self.language_code, "English")
         self.system_messages.append({
             "text": (
-                f"The customer prefers to converse in {language_name}. Respond naturally in {language_name}"
-                f" ({self.language_code}) unless explicitly asked to switch languages. Always conclude"
-                " each reply with one of the tags [continue], [promise], or [escalate]."
+                f"You are fluent in {language_name} ({self.language_code}). Always respond entirely in this language, even if the user uses another language."
+                " If the user switches to a different language, immediately follow them in that language on the next turn."
+                " Never state that you cannot speak a language—translate and continue the conversation naturally."
+                " Always conclude each reply with one of the tags [continue], [promise], or [escalate]."
             )
         })
         self._lock = threading.Lock()
@@ -304,6 +317,21 @@ class ClaudeChatSession:
             "role": "user",
             "content": [{"text": user_text}]
         }
+
+    def update_language(self, language_code: str) -> None:
+        if not language_code or language_code == self.language_code:
+            return
+        self.language_code = language_code
+        language_name = LANGUAGE_DISPLAY_NAMES.get(language_code, "English")
+        if self.system_messages:
+            self.system_messages[-1] = {
+                "text": (
+                    f"You are fluent in {language_name} ({language_code}). Always respond entirely in this language, even if the user uses another language."
+                    " If the user switches to a different language, immediately follow them in that language on the next turn."
+                    " Never state that you cannot speak a language—translate and continue the conversation naturally."
+                    " Always conclude each reply with one of the tags [continue], [promise], or [escalate]."
+                )
+            }
 
     def send(self, user_text: str) -> str:
         if not claude_runtime_client or not CLAUDE_MODEL_ID:
@@ -560,19 +588,79 @@ else:
 
 logger.app.info(f"🗒️ Transcript log file: {TRANSCRIPTS_FILE_PATH}")
 
+transcript_session_dir_env = os.getenv("CALL_TRANSCRIPTS_DIR")
+if transcript_session_dir_env:
+    PER_CALL_TRANSCRIPTS_DIR = Path(transcript_session_dir_env).expanduser()
+else:
+    PER_CALL_TRANSCRIPTS_DIR = base_transcript_dir / "call_sessions"
+
+try:
+    PER_CALL_TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+except Exception as session_dir_err:
+    fallback_session_dir = Path(tempfile.gettempdir()) / "voicebot_call_sessions"
+    fallback_session_dir.mkdir(parents=True, exist_ok=True)
+    logger.app.warning(
+        f"⚠️ Could not create per-call transcript directory at {PER_CALL_TRANSCRIPTS_DIR}: {session_dir_err}. "
+        f"Falling back to {fallback_session_dir}"
+    )
+    PER_CALL_TRANSCRIPTS_DIR = fallback_session_dir
+
+TRANSCRIPTS_BUCKET = os.getenv("TRANSCRIPTS_BUCKET")
+TRANSCRIPTS_S3_PREFIX = (os.getenv("TRANSCRIPTS_S3_PREFIX") or "").strip()
+if TRANSCRIPTS_S3_PREFIX and not TRANSCRIPTS_S3_PREFIX.endswith("/"):
+    TRANSCRIPTS_S3_PREFIX += "/"
+
+TRANSCRIPTS_S3_CLIENT: Optional[Any] = None
+if TRANSCRIPTS_BUCKET:
+    try:
+        TRANSCRIPTS_S3_CLIENT = boto3.client("s3", region_name=AWS_REGION)
+        logger.app.info(
+            f"☁️ Transcript S3 uploads enabled | bucket={TRANSCRIPTS_BUCKET}, prefix='{TRANSCRIPTS_S3_PREFIX}'"
+        )
+    except Exception as s3_init_error:
+        logger.error.error(f"❌ Failed to initialize S3 client for transcripts: {s3_init_error}")
+        TRANSCRIPTS_S3_CLIENT = None
+else:
+    logger.app.info("📁 TRANSCRIPTS_BUCKET not set; per-call transcripts will be stored locally only.")
+
 
 class TranscriptLogger:
     """Accumulates customer speech and writes to disk after silence gaps."""
 
-    def __init__(self, file_path: Path, call_sid: str, silence_gap: float = 5.0) -> None:
+    def __init__(
+        self,
+        file_path: Path,
+        call_sid: str,
+        silence_gap: float = 5.0,
+        per_call_dir: Optional[Path] = None,
+        s3_client: Optional[Any] = None,
+        s3_bucket: Optional[str] = None,
+        s3_prefix: str = "",
+    ) -> None:
         self.file_path = file_path
-        self.call_sid = call_sid
         self.silence_gap = silence_gap
         self.pending_segments: List[str] = []
         self.last_speech_time: Optional[float] = None
         self.header_written = False
         self.customer_name: Optional[str] = None
         self.customer_phone: Optional[str] = None
+        self.per_call_dir = per_call_dir or (self.file_path.parent / "call_sessions")
+        try:
+            self.per_call_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as per_call_err:
+            logger.app.warning(f"⚠️ Could not prepare per-call transcript directory: {per_call_err}")
+        self._session_file_path: Optional[Path] = None
+        self._session_file_initialized = False
+        self._needs_s3_sync = False
+        self.s3_client = s3_client
+        self.s3_bucket = s3_bucket
+        self.s3_prefix = s3_prefix or ""
+        if self.s3_prefix and not self.s3_prefix.endswith("/"):
+            self.s3_prefix += "/"
+        self._s3_key: Optional[str] = None
+        self.call_sid: str = ""
+        self._sanitized_call_sid: str = ""
+        self.set_call_sid(call_sid)
 
     def update_customer(self, name: Optional[str] = None, phone: Optional[str] = None) -> None:
         if name:
@@ -598,6 +686,7 @@ class TranscriptLogger:
 
     def flush(self, force: bool = False, current_time: Optional[float] = None) -> None:
         if not self.pending_segments:
+            self._sync_s3_if_needed()
             return
 
         current_time = current_time or time.time()
@@ -607,6 +696,7 @@ class TranscriptLogger:
         entry_text = " ".join(self.pending_segments).strip()
         if not entry_text:
             self.pending_segments.clear()
+            self._sync_s3_if_needed()
             return
 
         self._ensure_header()
@@ -620,6 +710,7 @@ class TranscriptLogger:
         )
         self.pending_segments.clear()
         self.last_speech_time = None
+        self._sync_s3_if_needed()
 
     def _ensure_header(self) -> None:
         if self.header_written:
@@ -646,6 +737,97 @@ class TranscriptLogger:
                 file.write(text)
         except Exception as exc:
             logger.error.error(f"❌ Failed to write transcript log: {exc}")
+        if self._session_file_path:
+            self._write_per_call_line(text)
+
+    def _write_per_call_line(self, text: str) -> None:
+        if not self._session_file_path:
+            return
+        append_mode = "a" if self._session_file_initialized else "w"
+        try:
+            self._session_file_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._session_file_path.open(append_mode, encoding="utf-8") as call_file:
+                call_file.write(text)
+            self._session_file_initialized = True
+            self._needs_s3_sync = True
+        except Exception as exc:
+            logger.error.error(f"❌ Failed to write per-call transcript: {exc}")
+
+    def set_call_sid(self, new_call_sid: Optional[str]) -> None:
+        if not new_call_sid:
+            return
+        new_call_sid = str(new_call_sid)
+        sanitized_sid = self._sanitize_call_sid(new_call_sid)
+        new_session_path = self.per_call_dir / f"{sanitized_sid}.txt"
+        previous_path = self._session_file_path
+
+        if (
+            previous_path
+            and previous_path != new_session_path
+            and self._session_file_initialized
+            and previous_path.exists()
+        ):
+            try:
+                if new_session_path.exists():
+                    new_session_path.unlink()
+                previous_path.rename(new_session_path)
+            except Exception as rename_err:
+                logger.app.warning(
+                    f"⚠️ Unable to rename transcript file {previous_path} → {new_session_path}: {rename_err}"
+                )
+
+        self.call_sid = new_call_sid
+        self._sanitized_call_sid = sanitized_sid
+        self._session_file_path = new_session_path
+
+        try:
+            self._session_file_path.parent.mkdir(parents=True, exist_ok=True)
+            if not self._session_file_path.exists():
+                with self._session_file_path.open("w", encoding="utf-8"):
+                    pass
+        except Exception as create_err:
+            logger.error.error(f"❌ Failed to initialize per-call transcript file: {create_err}")
+
+        self._session_file_initialized = (
+            self._session_file_path.exists() and self._session_file_path.stat().st_size > 0
+        )
+        if not self._session_file_initialized:
+            self.header_written = False
+        self._needs_s3_sync = False
+        self._s3_key = f"{self.s3_prefix}{sanitized_sid}.txt" if self.s3_bucket else None
+
+    @staticmethod
+    def _sanitize_call_sid(value: str) -> str:
+        return re.sub(r"[^A-Za-z0-9._-]", "_", value)
+
+    def _sync_s3_if_needed(self) -> None:
+        if (
+            not self._needs_s3_sync
+            or not self.s3_client
+            or not self.s3_bucket
+            or not self._session_file_path
+            or not self._session_file_path.exists()
+            or not self._s3_key
+        ):
+            return
+
+        try:
+            body = self._session_file_path.read_bytes()
+            self.s3_client.put_object(
+                Bucket=self.s3_bucket,
+                Key=self._s3_key,
+                Body=body,
+                ContentType="text/plain",
+            )
+            self._needs_s3_sync = False
+        except (BotoCoreError, ClientError) as aws_err:
+            logger.error.error(
+                f"❌ Failed to upload transcript for CallSid={self.call_sid} to S3: {aws_err}"
+            )
+        except Exception as exc:
+            logger.error.error(
+                f"❌ Unexpected error uploading transcript for CallSid={self.call_sid}: {exc}"
+            )
 
 # --- Constants ---
 BUFFER_DURATION_SECONDS = 1.0
@@ -727,18 +909,18 @@ GOODBYE_TEMPLATE = {
     "od-IN": "ଠିକ ଅଛି, କିଛି ଚିନ୍ତା ନାହିଁ. ପରେ ସମୟ ହେଲେ ଆମକୁ ଫୋନ କରନ୍ତୁ. ଧନ୍ୟବାଦ!"
 }
 
-SPEAK_NOW_PROMPT = {
-    "en-IN": "You can speak now.",
-    "hi-IN": "अब आप बोल सकते हैं।",
-    "ta-IN": "நீங்கள் இப்போது பேசலாம்.",
-    "te-IN": "మీరు ఇప్పుడు మాట్లాడవచ్చు.",
-    "ml-IN": "നിങ്ങൾക്ക് ഇപ്പോൾ സംസാരിക്കാം.",
-    "gu-IN": "તમે હવે બોલી શકો છો.",
-    "mr-IN": "आपण आता बोलू शकता.",
-    "bn-IN": "আপনি এখন কথা বলতে পারেন।",
-    "kn-IN": "ನೀವು ಈಗ ಮಾತನಾಡಬಹುದು.",
-    "pa-IN": "ਤੁਸੀਂ ਹੁਣ ਗੱਲ ਕਰ ਸਕਦੇ ਹੋ।",
-    "od-IN": "ଆପଣ ଏବେ କହିପାରିବେ।",
+PROMISE_GOODBYE_TEMPLATE = {
+    "en-IN": "Thank you for confirming the repayment. We appreciate your cooperation. Goodbye.",
+    "hi-IN": "भुगतान की पुष्टि करने के लिए धन्यवाद। हम आपके सहयोग की सराहना करते हैं। अलविदा.",
+    "ta-IN": "உங்கள் ஒத்துழைப்புக்கு மிக்க நன்றி. இனிய வணக்கம்.",
+    "te-IN": "చెల్లింపును నిర్ధారించినందుకు ధన్యవాదాలు. మీ సహకారాన్ని మేము అభినందిస్తున్నాం. నమస్తే.",
+    "ml-IN": "പേയ്മെന്റ് ഉറപ്പാക്കിയതിന് നന്ദി. നിങ്ങളുടെ സഹകരണത്തിന് നന്ദി. വിട.",
+    "gu-IN": "ચુકવણીની પુષ્ટિ કરવા બદલ આભાર. તમારા સહકાર માટે અમે આભારી છીએ. આભાર, અલવિદા.",
+    "mr-IN": "भरणा निश्चित केल्याबद्दल धन्यवाद. तुमच्या सहकार्याची आम्ही कदर करतो. नमस्कार.",
+    "bn-IN": "পেমেন্ট নিশ্চিত করার জন্য ধন্যবাদ। আপনার সহযোগিতার জন্য কৃতজ্ঞ। বিদায়।",
+    "kn-IN": "ಪಾವತಿ ದೃಢಪಡಿಸಿದಕ್ಕಾಗಿ ಧನ್ಯವಾದಗಳು. ನಿಮ್ಮ ಸಹಕಾರಕ್ಕೆ ಕೃತಜ್ಞತೆ. ವಂದನೆಗಳು.",
+    "pa-IN": "ਭੁਗਤਾਨ ਦੀ ਪੁਸ਼ਟੀ ਲਈ ਧੰਨਵਾਦ। ਅਸੀਂ ਤੁਹਾਡੇ ਸਹਿਯੋਗ ਦੀ ਕਦਰ ਕਰਦੇ ਹਾਂ। ਅਲਵਿਦਾ.",
+    "od-IN": "ପେମେଣ୍ଟ ସୁନିଶ୍ଚିତ କରିଥିବାରୁ ଧନ୍ୟବାଦ। ଆପଣଙ୍କ ସହଯୋଗକୁ ଆମେ ସ୍ୱାଗତ କରୁଛୁ। ବିଦାୟ."
 }
 
 # --- TTS & Audio Helper Functions ---
@@ -946,17 +1128,6 @@ async def play_goodbye_after_decline(websocket, lang: str):
     logger.tts.info(f"🔁 Converting goodbye after decline: {prompt_text}")
     audio_bytes = await sarvam_handler.synthesize_tts(prompt_text, lang)
     await stream_audio_to_websocket(websocket, audio_bytes)
-
-async def play_speak_now_prompt(websocket, lang: str) -> None:
-    """Tells the caller they can start speaking now."""
-    prompt_text = SPEAK_NOW_PROMPT.get(lang, SPEAK_NOW_PROMPT["en-IN"])
-    logger.tts.info(f"🔁 Converting speak-now prompt: {prompt_text}")
-    audio_bytes = await sarvam_handler.synthesize_tts(prompt_text, lang)
-    if not audio_bytes:
-        logger.tts.error("❌ Speak-now prompt synthesis returned no audio")
-        return
-    await stream_audio_to_websocket(websocket, audio_bytes)
-
 
 def _loan_suffix(loan_id: Optional[str]) -> str:
     if not loan_id:
@@ -1184,78 +1355,78 @@ LANGUAGE_DISPLAY_NAMES = {
 
 LANGUAGE_PROMPTS = {
     "en-IN": {
-        "confirmation": "Hello {name}. I'm calling from the bank. Am I speaking with {name} whose loan ID ends in {loan_suffix}?",
-        "connecting": "One moment please, I'm connecting you to our representative.",
+        "confirmation": "Hello {name}. I'm calling from South India Finvest. Am I speaking with {name} whose loan ID ends in {loan_suffix}?",
+        "connecting": "Thank you for confirming your identity, please wait a second.",
         "transfer": "Please wait while I transfer your call to our representative.",
         "sorry": "Sorry for the inconvenience. Thank you.",
         "repeat": "I'm sorry, I didn't catch that. Are you {name} whose loan ID ends in {loan_suffix}?",
     },
     "hi-IN": {
-        "confirmation": "नमस्ते {name}, मैं बैंक से बोल रहा हूँ। क्या मैं {loan_suffix} पर समाप्त होने वाले लोन की {name} से बात कर रहा हूँ?",
-        "connecting": "कृपया एक क्षण रुकिए, मैं आपको हमारे प्रतिनिधि से जोड़ रहा हूँ।",
+        "confirmation": "नमस्ते {name}, मैं South India Finvest से बोल रहा हूँ। क्या मैं {loan_suffix} पर समाप्त होने वाले लोन की {name} से बात कर रहा हूँ?",
+        "connecting": "पहचान की पुष्टि करने के लिए धन्यवाद, कृपया एक क्षण प्रतीक्षा करें।",
         "transfer": "कृपया प्रतीक्षा करें, मैं आपको हमारे प्रतिनिधि से जोड़ रहा हूँ।",
         "sorry": "क्षमा कीजिए। धन्यवाद।",
         "repeat": "माफ़ कीजिएगा, स्पष्ट नहीं सुन पाया। क्या आप {loan_suffix} पर समाप्त होने वाले लोन की {name} हैं?",
     },
     "ta-IN": {
-        "confirmation": "வணக்கம் {name}. நாங்கள் வங்கியிலிருந்து பேசுகிறோம். கடன் எண் முடிவில் {loan_suffix} கொண்ட {name} அவர்களா பேசுவது?",
-        "connecting": "ஒரு நிமிடம், உங்களை எங்கள் பிரதிநிதருடன் இணைக்கிறேன்.",
+        "confirmation": "வணக்கம் {name}. South India Finvest-இலிருந்து பேசுகிறோம். கடன் எண் முடிவில் {loan_suffix} கொண்ட {name} அவர்களா பேசுவது?",
+        "connecting": "உங்கள் அடையாளத்தை உறுதி செய்ததற்கு நன்றி, ஒரு விநாடி காத்திருக்கவும்.",
         "transfer": "தயவு செய்து காத்திருக்கவும், உங்களை எங்கள் பிரதிநிதரிடம் இணைக்கிறேன்.",
         "sorry": "மன்னிக்கவும். நன்றி.",
         "repeat": "மன்னிக்கவும், தெளிவாக கேட்கவில்லை. கடன் எண் முடிவில் {loan_suffix} கொண்ட {name} அவர்களா?",
     },
     "te-IN": {
-        "confirmation": "నమస్కారం {name} గారు, మా బ్యాంకు నుంచి మాట్లాడుతున్నాను. {loan_suffix}తో ముగిసే రుణానికి చెందిన {name} గారేనా?",
-        "connecting": "ఒక్క క్షణం వేచిచూడండి, మిమ్మల్ని మా ప్రతినిధితో కలుపుతున్నాను.",
+        "confirmation": "నమస్కారం {name} గారు, నేను South India Finvest నుండి మాట్లాడుతున్నాను. {loan_suffix}తో ముగిసే రుణానికి చెందిన {name} గారేనా?",
+        "connecting": "మీ గుర్తింపును నిర్ధారించినందుకు ధన్యవాదాలు, దయచేసి ఒక క్షణం వేచించండి.",
         "transfer": "దయచేసి వేచి ఉండండి, మిమ్మల్ని మా ప్రతినిధికి కలుపుతున్నాను.",
         "sorry": "క్షమించండి. ధన్యవాదాలు.",
         "repeat": "క్షమించండి, సరిగ్గా వినిపించలేదు. {loan_suffix}తో ముగిసే రుణానికి చెందిన {name} గారేనా?",
     },
     "ml-IN": {
-        "confirmation": "നമസ്കാരം {name}, ബാങ്കിൽ നിന്നാണ് വിളിക്കുന്നത്. വായ്പ നമ്പർ {loan_suffix} ആയ {name} ആണോ സംസാരിക്കുന്നത്?",
-        "connecting": "ഒരു നിമിഷം ദയവായി, നിങ്ങളെ നമ്മുടെ പ്രതിനിധിയുമായി ബന്ധിപ്പിക്കുന്നു.",
+        "confirmation": "നമസ്കാരം {name}, ഞാൻ South India Finvest ൽ നിന്ന് വിളിക്കുകയാണ്. വായ്പ നമ്പർ {loan_suffix} ഉള്ള {name} ആണോ സംസാരിക്കുന്നത്?",
+        "connecting": "നിങ്ങളുടെ തിരിച്ചറിയൽ സ്ഥിരീകരിച്ചതിന് നന്ദി, ദയവായി ഒരു നിമിഷം കാത്തിരിക്കൂ.",
         "transfer": "ദയവായി കാത്തിരിക്കൂ, നിങ്ങളെ നമ്മുടെ പ്രതിനിധിയിലേക്ക് ബന്ധിപ്പിക്കുന്നു.",
         "sorry": "ക്ഷമിക്കണം. നന്ദി.",
         "repeat": "ക്ഷമിക്കണം, വ്യക്തമായി കേൾക്കാനായില്ല. വായ്പ നമ്പർ {loan_suffix} ഉള്ള {name} ആണോ?",
     },
     "kn-IN": {
-        "confirmation": "ನಮಸ್ಕಾರ {name} ಸರ್/ಮೇಡಂ, ನಾವು ಬ್ಯಾಂಕಿನಿಂದ ಕರೆ ಮಾಡುತ್ತಿದ್ದೇವೆ. ಸಾಲ ಸಂಖ್ಯೆ {loan_suffix} ಅಂತ್ಯವಾಗಿರುವ {name} ಅವರೇನಾ?",
-        "connecting": "ಒಂದು ಕ್ಷಣ, ನಿಮಗೆ ನಮ್ಮ ಪ್ರತಿನಿಧಿಯನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇನೆ.",
+        "confirmation": "ನಮಸ್ಕಾರ {name} ಸರ್/ಮೇಡಂ, ನಾವು South India Finvest ನಿಂದ ಕರೆ ಮಾಡುತ್ತಿದ್ದೇವೆ. ಸಾಲ ಸಂಖ್ಯೆ {loan_suffix} ಅಂತ್ಯವಾಗಿರುವ {name} ಅವರೇನಾ?",
+        "connecting": "ನಿಮ್ಮ ಗುರುತನ್ನು ದೃಢೀಕರಿಸಿದ್ದಕ್ಕಾಗಿ ಧನ್ಯವಾದಗಳು, ದಯವಿಟ್ಟು ಕ್ಷಣಕಾಲ ಕಾಯಿರಿ.",
         "transfer": "ದಯವಿಟ್ಟು ಕ್ಷಣಕಾಲ ಕಾದಿರಿ, ನಿಮಗೆ ನಮ್ಮ ಪ್ರತಿನಿಧಿಯನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇನೆ.",
         "sorry": "ಕ್ಷಮಿಸಿ. ಧನ್ಯವಾದಗಳು.",
         "repeat": "ಕ್ಷಮಿಸಿ, ಸ್ಪಷ್ಟವಾಗಿ ಕೇಳಿಸಲಿಲ್ಲ. ಸಾಲ ಸಂಖ್ಯೆ {loan_suffix} ಹೊಂದಿರುವ {name} ಅವರೇನಾ?",
     },
     "bn-IN": {
-        "confirmation": "নমস্কার {name}, আমি ব্যাংক থেকে বলছি। {loan_suffix} নম্বরে শেষ হওয়া লোনের {name} এর সঙ্গেই কি কথা বলছি?",
-        "connecting": "একটু অপেক্ষা করুন, আপনাকে আমাদের প্রতিনিধির সাথে যুক্ত করছি।",
+        "confirmation": "নমস্কার {name}, আমি South India Finvest থেকে বলছি। {loan_suffix} নম্বরে শেষ হওয়া লোনের {name} এর সঙ্গেই কি কথা বলছি?",
+        "connecting": "আপনার পরিচয় নিশ্চিত করার জন্য ধন্যবাদ, অনুগ্রহ করে এক মুহূর্ত অপেক্ষা করুন।",
         "transfer": "দয়া করে অপেক্ষা করুন, আপনাকে আমাদের প্রতিনিধির সাথে যুক্ত করছি।",
         "sorry": "দুঃখিত। ধন্যবাদ।",
         "repeat": "দুঃখিত, স্পষ্ট শুনতে পাইনি। {loan_suffix} নম্বরে শেষ হওয়া লোনের {name} কি আপনি?",
     },
     "mr-IN": {
-        "confirmation": "नमस्कार {name}, मी बँकेतून बोलत आहे. {loan_suffix} ने समाप्त होणाऱ्या कर्जाचे {name} आपण आहात का?",
-        "connecting": "कृपया एक क्षण थांबा, मी तुम्हाला आमच्या प्रतिनिधीशी जोडत आहे.",
+        "confirmation": "नमस्कार {name}, मी South India Finvest मधून बोलत आहे. {loan_suffix} ने समाप्त होणाऱ्या कर्जाचे {name} आपण आहात का?",
+        "connecting": "आपली ओळख निश्चित केल्याबद्दल धन्यवाद, कृपया क्षणभर थांबा.",
         "transfer": "कृपया प्रतीक्षा करा, मी तुम्हाला आमच्या प्रतिनिधीशी जोडत आहे.",
         "sorry": "माफ करा. धन्यवाद.",
         "repeat": "माफ करा, स्पष्ट ऐकू आले नाही. {loan_suffix} ने संपणाऱ्या कर्जाचे {name} आपण आहात का?",
     },
     "gu-IN": {
-        "confirmation": "નમસ્તે {name}, અમે બેંકમાંથી વાત કરી રહ્યા છીએ. {loan_suffix} પર સમાપ્ત થતો લોન ધરાવતા {name} સાથે જ હું વાત કરી રહ્યો છુંને?",
-        "connecting": "જોયું, હું તમને અમારા પ્રતિનિધિ સાથે જોડું છું.",
+        "confirmation": "નમસ્તે {name}, અમે South India Finvest માંથી વાત કરી રહ્યા છીએ. {loan_suffix} પર સમાપ્ત થતો લોન ધરાવતા {name} સાથે જ હું વાત કરી રહ્યો છુંને?",
+        "connecting": "તમારી ઓળખની પુષ્ટિ કરવા બદલ આભાર, કૃપા કરીને થોડો સમય રાહ જુઓ.",
         "transfer": "કૃપા કરીને રાહ જુઓ, હું તમને અમારા પ્રતિનિધિ સાથે જોડું છું.",
         "sorry": "માફ કરશો. આભાર.",
-        "repeat": "માફ કરશો, મને સ્પષ્ટ સાંભળાયું નહીં. {loan_suffix} પર સમાપ્ત થતો લોન ધરાવતા {name} તમે જ છો ને?",
+        "repeat": "માફ કરશો, સ્પષ્ટ સાંભળાયું નહીં. {loan_suffix} પર સમાપ્ત થતો લોન ધરાવતા {name} તમે જ છો ને?",
     },
     "pa-IN": {
-        "confirmation": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ {name} ਜੀ, ਅਸੀਂ ਬੈਂਕ ਤੋਂ ਗੱਲ ਕਰ ਰਹੇ ਹਾਂ। ਕੀ ਮੈਂ {loan_suffix} ਤੇ ਖਤਮ ਹੋਣ ਵਾਲੇ ਲੋਨ ਦੇ {name} ਨਾਲ ਹੀ ਗੱਲ ਕਰ ਰਿਹਾ ਹਾਂ?",
-        "connecting": "ਕਿਰਪਾ ਕਰਕੇ ਇਕ ਪਲ ਰੁੱਕੋ, ਮੈਂ ਤੁਹਾਨੂੰ ਸਾਡੇ ਨੁਮਾਇੰਦੇ ਨਾਲ ਜੋੜ ਰਿਹਾ ਹਾਂ।",
+        "confirmation": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ {name} ਜੀ, ਅਸੀਂ South India Finvest ਤੋਂ ਗੱਲ ਕਰ ਰਹੇ ਹਾਂ। ਕੀ ਮੈਂ {loan_suffix} ਤੇ ਖਤਮ ਹੋਣ ਵਾਲੇ ਲੋਨ ਦੇ {name} ਨਾਲ ਹੀ ਗੱਲ ਕਰ ਰਿਹਾ ਹਾਂ?",
+        "connecting": "ਤੁਹਾਡੀ ਪਛਾਣ ਪੁਸ਼ਟੀ ਕਰਨ ਲਈ ਧੰਨਵਾਦ, ਕਿਰਪਾ ਕਰਕੇ ਇੱਕ ਪਲ ਉਡੀਕ ਕਰੋ।",
         "transfer": "ਕਿਰਪਾ ਕਰਕੇ ਉਡੀਕ ਕਰੋ, ਮੈਂ ਤੁਹਾਨੂੰ ਸਾਡੇ ਨੁਮਾਇੰਦੇ ਨਾਲ ਜੋੜ ਰਿਹਾ ਹਾਂ।",
         "sorry": "ਮਾਫ਼ ਕਰਨਾ। ਧੰਨਵਾਦ।",
         "repeat": "ਮਾਫ਼ ਕੀਜੀਏ, ਠੀਕ ਨਾਲ ਸੁਣ ਨਹੀਂ ਸਕਿਆ। {loan_suffix} 'ਤੇ ਖਤਮ ਹੋਣ ਵਾਲੇ ਲੋਨ ਦੇ {name} ਤੁਸੀਂ ਹੋ?",
     },
     "od-IN": {
-        "confirmation": "ନମସ୍କାର {name}, ମୁଁ ବ୍ୟାଙ୍କରୁ କଥାହେଉଛି। {loan_suffix} ସହିତ ଶେଷ ହେଉଥିବା ଋଣର {name} ସହିତ କଥାହେଉଛି କି?",
-        "connecting": "ଦୟାକରି କିଛି ମୁହୂର୍ତ୍ତ ଅପେକ୍ଷା କରନ୍ତୁ, ମୁଁ ଆପଣଙ୍କୁ ଆମ ପ୍ରତିନିଧି ସହିତ ଯୋଡ଼ୁଛି।",
+        "confirmation": "ନମସ୍କାର {name}, ମୁଁ South India Finvest ରୁ କଥାହେଉଛି। {loan_suffix} ସହିତ ଶେଷ ହେଉଥିବା ଋଣର {name} ସହିତ କଥାହେଉଛି କି?",
+        "connecting": "ଆପଣଙ୍କ ପରିଚୟ ନିଶ୍ଚିତ କରିଥିବା ପାଇଁ ଧନ୍ୟବାଦ, ଦୟାକରି କିଛି ମୁହୂର୍ତ୍ତ ଅପେକ୍ଷା କରନ୍ତୁ।",
         "transfer": "ଦୟାକରି ଅପେକ୍ଷା କରନ୍ତୁ, ମୁଁ ଆପଣଙ୍କୁ ଆମ ପ୍ରତିନିଧି ସହିତ ଯୋଡ଼ୁଛି।",
         "sorry": "କ୍ଷମା କରନ୍ତୁ। ଧନ୍ୟବାଦ।",
         "repeat": "କ୍ଷମା କରିବେ, ସ୍ପଷ୍ଟ ହେଉନି। {loan_suffix} ସହିତ ଶେଷ ହେଉଥିବା ଋଣର {name} ଆପଣ ତି?",
@@ -1441,8 +1612,7 @@ async def auth_session_status(request: Request):
     session = get_session(request)
     user = session.get("user")
     ttl = session.get_ttl()
-    session.extend_session()
-    remaining = session.get_ttl()
+    remaining = ttl if ttl is not None else -1
 
     if not user:
         return JSONResponse(
@@ -1636,7 +1806,14 @@ async def run_voice_session(
     if not call_sid:
         call_sid = session_id
 
-    transcript_logger = TranscriptLogger(TRANSCRIPTS_FILE_PATH, call_sid)
+    transcript_logger = TranscriptLogger(
+        TRANSCRIPTS_FILE_PATH,
+        call_sid,
+        per_call_dir=PER_CALL_TRANSCRIPTS_DIR,
+        s3_client=TRANSCRIPTS_S3_CLIENT,
+        s3_bucket=TRANSCRIPTS_BUCKET,
+        s3_prefix=TRANSCRIPTS_S3_PREFIX,
+    )
 
     conversation_stage = "AWAIT_START"  # AWAIT_START → WAITING_CONFIRMATION → CLAUDE_CHAT/GOODBYE_SENT/WAITING_DISCONNECT
     audio_buffer = bytearray()
@@ -1796,7 +1973,7 @@ async def run_voice_session(
         )
         if candidate_sid:
             call_sid = candidate_sid
-            transcript_logger.call_sid = call_sid
+            transcript_logger.set_call_sid(call_sid)
             logger.websocket.info(f"🎯 Resolved CallSid: {call_sid}")
 
         info: Optional[Dict[str, Any]] = None
@@ -1891,7 +2068,7 @@ async def run_voice_session(
             claude_chat = claude_chat_manager.start_session(call_sid, customer_info)
             if claude_chat:
                 intro_prompt = (
-                    "The caller is now on the line. Introduce yourself as Priya from Intalks NGN Bank, "
+                    "The caller is now on the line. Introduce yourself as Priya from South India Finvest Bank, "
                     "briefly remind them about the overdue EMI amount of {amount}, and immediately ask "
                     "for a concrete repayment date. Respond entirely in {language_name} ({language_code}). "
                     "Keep it under two short sentences and append a status tag [continue] at the end."
@@ -1901,6 +2078,7 @@ async def run_voice_session(
                     language_code=current_language,
                 )
                 intro = await claude_reply(claude_chat, intro_prompt)
+                intro_text = ""
                 if intro:
                     intro_text, _ = parse_claude_response(intro)
                     if transcript_logger and intro_text:
@@ -1913,8 +2091,10 @@ async def run_voice_session(
                                     f"🌐 Switching assistant voice language {current_language} → {intro_language}"
                                 )
                                 current_language = intro_language
+                                if claude_chat:
+                                    claude_chat.update_language(current_language)
+                if intro_text:
                     await speak_text(intro_text, current_language)
-                await play_speak_now_prompt(websocket, current_language)
                 logger.websocket.info("🤖 Claude session established")
             else:
                 await speak_text("Our specialist is here. How can I assist you today?")
@@ -1951,29 +2131,35 @@ async def run_voice_session(
         claude_turns += 1
 
         sentence_enders = {'.', '!', '?', '।', '！', '？'}
-        speech_queue: asyncio.Queue = asyncio.Queue()
-        speech_closed = False
-
-        async def speech_worker():
-            while True:
-                sentence = await speech_queue.get()
-                if sentence is None:
-                    break
-                trimmed = sentence.strip()
-                if trimmed:
-                    cleaned_sentence = STATUS_TAG_PATTERN.sub("", trimmed).strip()
-                    if cleaned_sentence:
-                        await speak_text(cleaned_sentence, current_language)
-
-        async def finalize_speech_queue():
-            nonlocal speech_closed
-            if not speech_closed:
-                speech_closed = True
-                await speech_queue.put(None)
-                await speech_worker_task
-
-        speech_worker_task = asyncio.create_task(speech_worker())
         buffer = ""
+        audio_queue: asyncio.Queue = asyncio.Queue()
+        audio_pipeline_closed = False
+
+        async def playback_worker():
+            while True:
+                item = await audio_queue.get()
+                if item is None:
+                    break
+                synth_task, text_value, lang_code = item
+                audio_bytes = None
+                try:
+                    audio_bytes = await synth_task
+                except Exception as synth_err:
+                    logger.tts.error(f"❌ TTS synthesis failed for chunk: {synth_err}")
+                if audio_bytes:
+                    await stream_audio_to_websocket(websocket, audio_bytes)
+                else:
+                    await speak_text(text_value, lang_code)
+
+        playback_worker_task = asyncio.create_task(playback_worker())
+
+        async def close_audio_pipeline():
+            nonlocal audio_pipeline_closed
+            if audio_pipeline_closed:
+                return
+            audio_pipeline_closed = True
+            await audio_queue.put(None)
+            await playback_worker_task
 
         def split_sentences(text: str) -> tuple[List[str], str]:
             sentences: List[str] = []
@@ -1990,6 +2176,15 @@ async def run_voice_session(
             remainder = text[last_idx:]
             return sentences, remainder
 
+        async def enqueue_sentence(sentence_text: str, lang_code: str) -> None:
+            trimmed = STATUS_TAG_PATTERN.sub("", sentence_text).strip()
+            if not trimmed:
+                return
+            synth_task = asyncio.create_task(
+                sarvam_handler.synthesize_tts(trimmed, lang_code)
+            )
+            await audio_queue.put((synth_task, trimmed, lang_code))
+
         async def handle_chunk(chunk: str):
             nonlocal buffer
             if not chunk:
@@ -2000,20 +2195,23 @@ async def run_voice_session(
             buffer += cleaned
             sentences, remainder = split_sentences(buffer)
             buffer = remainder
-            for sentence in sentences:
-                await speech_queue.put(sentence)
+            if sentences:
+                lang_snapshot = current_language
+                for sentence in sentences:
+                    await enqueue_sentence(sentence, lang_snapshot)
 
         try:
             raw_reply = await stream_claude_response(claude_chat, transcript, handle_chunk)
         except Exception as err:
             logger.websocket.error(f"❌ Streaming Claude reply failed: {err}")
-            await finalize_speech_queue()
+            await close_audio_pipeline()
             await speak_text("I didn't catch that. Could you please repeat?")
             return "continue"
 
         if buffer.strip():
-            await speech_queue.put(buffer.strip())
-        await finalize_speech_queue()
+            await enqueue_sentence(buffer.strip(), current_language)
+            buffer = ""
+        await close_audio_pipeline()
 
         if not raw_reply:
             await speak_text("I didn't catch that. Could you please repeat?")
@@ -2022,6 +2220,22 @@ async def run_voice_session(
         cleaned_agent_text, status = parse_claude_response(raw_reply)
         logger.websocket.info(f"🤖 Claude status={status} text='{cleaned_agent_text}'")
         agent_text = cleaned_agent_text
+        unacceptable_phrases = {
+            "can't speak", "cannot speak", "i don't know", "don't know this language", "unable to speak",
+            "sorry, i can't", "i do not speak"
+        }
+        if any(phrase in cleaned_agent_text.lower() for phrase in unacceptable_phrases):
+            language_name = LANGUAGE_DISPLAY_NAMES.get(current_language, "English")
+            logger.websocket.warning("⚠️ Claude returned language refusal; requesting correction")
+            correction_prompt = (
+                f"Your previous reply '{cleaned_agent_text}' was unacceptable. Respond fluently in {language_name} ({current_language}) "
+                "with the same intent, never stating you cannot speak that language. End with [continue]."
+            )
+            raw_reply = await claude_reply(claude_chat, correction_prompt)
+            if raw_reply:
+                cleaned_agent_text, status = parse_claude_response(raw_reply)
+                agent_text = cleaned_agent_text
+                logger.websocket.info(f"🤖 Claude corrected status={status} text='{cleaned_agent_text}'")
         if status == "promise" and cleaned_agent_text.endswith("?"):
             logger.websocket.info("ℹ️ Ignoring [promise] tag because assistant response is a question")
             status = "continue"
@@ -2053,6 +2267,8 @@ async def run_voice_session(
                         f"🌐 Switching assistant voice language {current_language} → {detected_response_language}"
                     )
                     current_language = detected_response_language
+                    if claude_chat:
+                        claude_chat.update_language(current_language)
 
         if allowed_to_escalate:
             logger.websocket.info(
@@ -2064,10 +2280,11 @@ async def run_voice_session(
             return "end"
 
         if status == "promise":
-            await speak_text(
-                "Thank you for confirming the repayment. We appreciate your cooperation. Goodbye.",
-                current_language
+            goodbye_text = PROMISE_GOODBYE_TEMPLATE.get(
+                current_language,
+                PROMISE_GOODBYE_TEMPLATE["en-IN"],
             )
+            await speak_text(goodbye_text, current_language)
             conversation_stage = "GOODBYE_SENT"
             interaction_complete = True
             return "end"
@@ -2181,6 +2398,8 @@ async def run_voice_session(
                     f"🌐 Switching customer language {current_language} → {detected_lang}"
                 )
                 current_language = detected_lang
+                if claude_chat:
+                    claude_chat.update_language(current_language)
 
             if conversation_stage == "WAITING_CONFIRMATION":
                 result = await handle_confirmation_response(transcript)
